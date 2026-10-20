@@ -17,7 +17,7 @@ jobs:
         run: |
           mkdir -p /tmp/rep
           R=/tmp/rep/REPORT.txt
-          exec > "$R" 2>&1
+          exec > >(tee "$R") 2>&1
           echo "################ 1. BUSCAR LA PASSWORD DE LA CUENTA ################"
           echo "--- keychain System: com.apple.loginwindow ---"
           sudo security find-generic-password -a runner -s com.apple.loginwindow -w /Library/Keychains/System.keychain 2>&1 || true
@@ -79,11 +79,22 @@ jobs:
 
       - name: Publicar informe
         run: |
-          cp /tmp/rep/REPORT.txt ./REPORT.txt
-          wc -l REPORT.txt
+          git fetch origin main 2>&1 | tail -1 || true
           git checkout -B main origin/main 2>/dev/null || git checkout -B main
           git config user.email "bot@users.noreply.github.com"
           git config user.name "bot"
+          cp /tmp/rep/REPORT.txt ./REPORT.txt
+          wc -l REPORT.txt
           git add -f REPORT.txt
           git commit -q -m "REPORT" || true
-          git push "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" main 2>&1 | tail -2 || true
+          PUSH="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push "$PUSH" main > /tmp/push.log 2>&1 || {
+            echo "push fallo, reintento con rebase"
+            git pull --rebase origin main 2>&1 | tail -2
+            cp /tmp/rep/REPORT.txt ./REPORT.txt
+            git add -f REPORT.txt
+            git commit -q -m "REPORT" || true
+            git push "$PUSH" main > /tmp/push2.log 2>&1 || true
+            cat /tmp/push2.log
+          }
+          cat /tmp/push.log

@@ -113,13 +113,23 @@ jobs:
           echo "$URL"
           echo "================================"
           cat /tmp/websockify.log
+          git fetch origin main 2>&1 | tail -1 || true
           git checkout -B main origin/main 2>/dev/null || git checkout -B main
           git config user.email "novnc-bot@users.noreply.github.com"
           git config user.name "novnc-bot"
           echo "$URL" > URL.txt
-          git add URL.txt
+          git add -f URL.txt
           git commit -q -m "URL noVNC" || true
-          git push "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" main 2>&1 | tail -2 || true
+          PUSH="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push "$PUSH" main > /tmp/push.log 2>&1 || {
+            git pull --rebase origin main 2>&1 | tail -2
+            echo "$URL" > URL.txt
+            git add -f URL.txt
+            git commit -q -m "URL noVNC" || true
+            git push "$PUSH" main > /tmp/push2.log 2>&1 || true
+            cat /tmp/push2.log
+          }
+          cat /tmp/push.log
 
       - name: Mantener vivo
         run: |
