@@ -20,7 +20,7 @@ jobs:
       - name: Extraer imagen oficial de macOS 26 (forzado a 26.6)
         run: |
           echo "== softwareupdate --fetch-full-installer 26.6 =="
-          softwareupdate --fetch-full-installer --full-installer-version 26.6 --no-prompt 2>&1 | tail -6 || true
+          softwareupdate --fetch-full-installer --full-installer-version 26.6 --agree-to-license 2>&1 | tail -8 || true
           echo
           ls -la /Applications/ 2>/dev/null | grep -i "Install macOS" || echo "no se encontro instalador en /Applications"
           echo
@@ -33,7 +33,7 @@ jobs:
           sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
             -activate -configure -access -on -users runner -privs -all \
             -clientopts -setvncpw -vncpw macos26 \
-            -restart -agent -force 2>&1 || true
+            -restart -agent 2>&1 || true
           sleep 6
           sudo launchctl list 2>/dev/null | grep -i screensharing || echo "screensharing no aparece en launchctl"
           (nc -z 127.0.0.1 5900 && echo "puerto 5900 ABIERTO") || echo "puerto 5900 cerrado"
@@ -44,8 +44,9 @@ jobs:
           curl -fsSL -o /tmp/novnc.tar.gz https://github.com/novnc/noVNC/archive/refs/tags/v1.5.0.tar.gz
           tar -xzf /tmp/novnc.tar.gz -C /tmp/novnc --strip-components=1
           echo "noVNC OK: $(ls /tmp/novnc/vnc.html >/dev/null 2>&1 && echo si || echo no)"
-          python3 -m pip install --user websockify 2>&1 | tail -3
-          WS=$(python3 -c "import websockify,os;print(os.path.dirname(websockify.__file__))")
+          python3 -m venv /tmp/venv
+          /tmp/venv/bin/pip install -q websockify 2>&1 | tail -3
+          WS=$(/tmp/venv/bin/python -c "import websockify,os;print(os.path.dirname(websockify.__file__))")
           echo "websockify: $WS"
           echo "$WS" > /tmp/ws_path
           curl -fsSL -o /tmp/cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-arm64
@@ -55,7 +56,7 @@ jobs:
       - name: Levantar noVNC + tunel Cloudflare
         run: |
           WS=$(cat /tmp/ws_path)
-          nohup python3 "$WS/websocketproxy.py" --web /tmp/novnc 6080 localhost:5900 >/tmp/websockify.log 2>&1 &
+          nohup /tmp/venv/bin/python "$WS/websocketproxy.py" --web /tmp/novnc 6080 localhost:5900 >/tmp/websockify.log 2>&1 &
           sleep 4
           nohup /tmp/cloudflared tunnel --url http://localhost:6080 >/tmp/cf.log 2>&1 &
           sleep 18
