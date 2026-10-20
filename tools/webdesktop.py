@@ -4,19 +4,22 @@ Escritorio web para macOS 26 en un runner de GitHub Actions.
 
 VISTA   : streaming MJPEG nativo (multipart/x-mixed-replace). El navegador
           reproduce el flujo solo, sin polling.
-CAPTURA : CoreGraphics (CGDisplayCreateImage) en bucle cerrado -> ~30 fps.
-          Si pyobjc no esta disponible, cae a 'screencapture' por proceso.
+CAPTURA : CoreGraphics (CGDisplayCreateImage) + JPEG con ImageIO, en un PROCESO
+          HIJO para no competir con el hilo HTTP por el GIL.
+          Si pyobjc no esta, cae a 'screencapture' por proceso.
 CONTROL : POST /event con inyeccion de raton/teclado via cliclick.
 
 Endpoints:
   GET  /              -> HTML
   GET  /stream.mjpeg  -> stream de frames
   GET  /screen.jpg    -> frame actual (debug)
-  GET  /info          -> {width,height,fps,backend}
+  GET  /info          -> {width,height,screen_w,screen_h,fps,backend}
+  GET  /profile       -> desglose de tiempos + benchmark del encoder
   POST /event         -> {kind: move|down|up|key|text|scroll, ...}
 """
 import http.server
 import json
+import multiprocessing as mp
 import os
 import shutil
 import socketserver
@@ -27,12 +30,12 @@ import time
 SHOT = "/tmp/webdesktop.jpg"
 STATE = {"data": b"", "mtime": 0.0, "seq": 0, "fps": 0.0, "backend": "?",
          "iw": 1024, "ih": 768, "sw": 1024, "sh": 768,
-         # perfilado: medias en ms de cada fase
-         "t_capture": 0.0, "t_encode": 0.0, "t_publish": 0.0, "n": 0}
+         "t_capture": 0.0, "t_encode": 0.0, "t_publish": 0.0, "n": 0,
+         "bench": {}}
 LOCK = threading.Lock()
 SCREEN = {"w": 1024, "h": 768}
 FPS = float(os.environ.get("FPS", "30"))
-QUALITY = float(os.environ.get("QUALITY", "0.45"))
+QUALITY = float(os.environ.get("QUALITY", "0.35"))
 
 KEYMAP = {
     "Enter": "return", "Backspace": "delete", "Tab": "tab", "Escape": "esc",
@@ -42,20 +45,6 @@ KEYMAP = {
     "Delete": "delete", "Meta": "command", "Control": "ctrl", "Alt": "alt",
     "Shift": "shift",
 }
-
-try:
-    from Quartz import (
-        CGMainDisplayID, CGDisplayCreateImage, CGDisplayPixelsWide,
-        CGDisplayPixelsHigh, CGImageGetWidth, CGImageGetHeight,
-        CGImageDestinationCreateWithURL,
-        CGImageDestinationAddImage, CGImageDestinationFinalize,
-        CFURLCreateFromFileSystemRepresentation,
-        kCGImageDestinationLossyCompressionQuality,
-    )
-    QUARTZ = True
-except Exception as _e:  # pragma: no cover
-    QUARTZ = False
-    _QUARTZ_ERR = str(_e)
 
 
 def find_cliclick():
@@ -81,156 +70,169 @@ def run_via_bash(cmd, timeout=15):
         return None
 
 
-def _publish(data):
-    with LOCK:
-        STATE["data"] = data
-        STATE["mtime"] = time.time()
-        STATE["seq"] += 1
+# ---------------------------------------------------------------- captura (hijo)
 
-
-def capture_quartz():
-    """Captura nativa de CoreGraphics + JPEG con ImageIO (sin procesos)."""
-    did = CGMainDisplayID()
-    SCREEN["w"] = CGDisplayPixelsWide(did) or 1024
-    SCREEN["h"] = CGDisplayPixelsHigh(did) or 768
-    path = SHOT.encode()
-    url = CFURLCreateFromFileSystemRepresentation(None, path, len(path), False)
-    interval = 1.0 / FPS
-    frames = 0
-    t0 = time.time()
-    mem_ok = True
+def capture_worker(q, fps, quality):
+    """Proceso hijo: captura con CoreGraphics y encola los frames."""
     try:
+        from Quartz import (
+            CGMainDisplayID, CGDisplayCreateImage, CGDisplayPixelsWide,
+            CGDisplayPixelsHigh, CGImageGetWidth, CGImageGetHeight,
+            CGImageDestinationCreateWithData, CGImageDestinationAddImage,
+            CGImageDestinationFinalize, kCGImageDestinationLossyCompressionQuality,
+        )
         from Foundation import NSMutableData
-        from Quartz import CGImageDestinationCreateWithData
-    except Exception:
-        mem_ok = False
-    bench_n = 0
+    except Exception as e:
+        q.put(("err", "quartz no disponible: " + str(e)[:150]))
+        return
+
+    did = CGMainDisplayID()
+    interval = 1.0 / max(1.0, fps)
+    n = 0
+    bench = None
     while True:
         t = time.time()
         try:
             t0c = time.time()
             img = CGDisplayCreateImage(did)
             t_capture = (time.time() - t0c) * 1000
-            if img is not None:
-                # Tamano real de la IMAGEN capturada y del display actual.
-                # Se recalcula en cada frame: si el usuario cambia la
-                # resolucion en Ajustes, el mapeo del puntero se corrige solo.
-                try:
-                    iw = CGImageGetWidth(img)
-                    ih = CGImageGetHeight(img)
-                    sw = CGDisplayPixelsWide(did)
-                    sh = CGDisplayPixelsHigh(did)
-                except Exception:
-                    iw = ih = sw = sh = 0
-                if iw and ih:
-                    with LOCK:
-                        STATE["iw"] = iw
-                        STATE["ih"] = ih
-                        STATE["sw"] = sw or iw
-                        STATE["sh"] = sh or ih
-                    SCREEN["w"], SCREEN["h"] = sw or iw, sh or ih
+            if img is None:
+                time.sleep(0.1)
+                continue
+            iw = CGImageGetWidth(img)
+            ih = CGImageGetHeight(img)
+            sw = CGDisplayPixelsWide(did)
+            sh = CGDisplayPixelsHigh(did)
+
+            t0e = time.time()
+            data = None
+            try:
+                buf = NSMutableData.data()
+                dest = CGImageDestinationCreateWithData(buf, "public.jpeg", 1, None)
+                if dest is not None:
+                    CGImageDestinationAddImage(
+                        dest, img,
+                        {kCGImageDestinationLossyCompressionQuality: quality})
+                    if CGImageDestinationFinalize(dest):
+                        data = bytes(buf)
+            except Exception:
                 data = None
-                t0e = time.time()
-                if mem_ok:
-                    try:
-                        buf = NSMutableData.data()
-                        dest = CGImageDestinationCreateWithData(
-                            buf, "public.jpeg", 1, None)
-                        if dest is not None:
-                            CGImageDestinationAddImage(
-                                dest, img,
-                                {kCGImageDestinationLossyCompressionQuality: QUALITY})
-                            if CGImageDestinationFinalize(dest):
-                                data = bytes(buf)
-                    except Exception:
-                        mem_ok = False
-                        data = None
-                if data is None:
-                    dest = CGImageDestinationCreateWithURL(
-                        url, "public.jpeg", 1, None)
+            t_encode = (time.time() - t0e) * 1000
+
+            if data is None:
+                # fallback: escribir a fichero y releer
+                try:
+                    from Quartz import (CGImageDestinationCreateWithURL,
+                                        CFURLCreateFromFileSystemRepresentation)
+                    p = SHOT.encode()
+                    url = CFURLCreateFromFileSystemRepresentation(
+                        None, p, len(p), False)
+                    dest = CGImageDestinationCreateWithURL(url, "public.jpeg", 1, None)
                     if dest is not None:
                         CGImageDestinationAddImage(
                             dest, img,
-                            {kCGImageDestinationLossyCompressionQuality: QUALITY})
+                            {kCGImageDestinationLossyCompressionQuality: quality})
                         CGImageDestinationFinalize(dest)
                         with open(SHOT, "rb") as f:
                             data = f.read()
-                if data:
-                    t_encode = (time.time() - t0e) * 1000
-                    t0p = time.time()
-                    _publish(data)
-                    t_publish = (time.time() - t0p) * 1000
-                    with LOCK:
-                        n = STATE["n"] + 1
-                        STATE["n"] = n
-                        a = n - 1
-                        STATE["t_capture"] = (STATE["t_capture"] * a + t_capture) / n
-                        STATE["t_encode"] = (STATE["t_encode"] * a + t_encode) / n
-                        STATE["t_publish"] = (STATE["t_publish"] * a + t_publish) / n
-                    frames += 1
-                    # micro-benchmark del encoder cada ~200 frames
-                    bench_n += 1
-                    if bench_n >= 200 and mem_ok:
-                        bench_n = 0
-                        try:
-                            from Quartz import (CGImageCreateWithImageInRect,
-                                                CGRectMake)
-                            iw2 = CGImageGetWidth(img)
-                            ih2 = CGImageGetHeight(img)
-                            out = {}
-                            for label, (sc, q) in (
-                                    ("full_q35", (1.0, 0.35)),
-                                    ("half_q35", (0.5, 0.35)),
-                                    ("quarter_q35", (0.25, 0.35)),
-                                    ("full_q20", (1.0, 0.20))):
-                                g = img
-                                if sc != 1.0:
-                                    g = CGImageCreateWithImageInRect(
-                                        img, CGRectMake(0, 0,
-                                                        int(iw2 * sc),
-                                                        int(ih2 * sc)))
-                                t = time.time()
-                                b = NSMutableData.data()
-                                dd = CGImageDestinationCreateWithData(
-                                    b, "public.jpeg", 1, None)
-                                CGImageDestinationAddImage(
-                                    dd, g,
-                                    {kCGImageDestinationLossyCompressionQuality: q})
-                                CGImageDestinationFinalize(dd)
-                                out[label] = [round((time.time() - t) * 1000, 2),
-                                              len(b)]
-                            with LOCK:
-                                STATE["bench"] = out
-                        except Exception as e:
-                            with LOCK:
-                                STATE["bench"] = {"error": str(e)[:100]}
-                    el = time.time() - t0
-                    if el > 1:
-                        with LOCK:
-                            STATE["fps"] = frames / el
-                        frames = 0
-                        t0 = time.time()
+                except Exception:
+                    data = None
+
+            if data is None:
+                time.sleep(0.1)
+                continue
+
+            n += 1
+            if n % 200 == 0:
+                try:
+                    from Quartz import CGImageCreateWithImageInRect, CGRectMake
+                    out = {}
+                    for label, (sc, q2) in (("full_q35", (1.0, 0.35)),
+                                           ("half_q35", (0.5, 0.35)),
+                                           ("quarter_q35", (0.25, 0.35)),
+                                           ("full_q20", (1.0, 0.20))):
+                        g = img
+                        if sc != 1.0:
+                            g = CGImageCreateWithImageInRect(
+                                img, CGRectMake(0, 0, int(iw * sc), int(ih * sc)))
+                        tb = time.time()
+                        b = NSMutableData.data()
+                        dd = CGImageDestinationCreateWithData(b, "public.jpeg", 1, None)
+                        CGImageDestinationAddImage(
+                            dd, g,
+                            {kCGImageDestinationLossyCompressionQuality: q2})
+                        CGImageDestinationFinalize(dd)
+                        out[label] = [round((time.time() - tb) * 1000, 2), len(b)]
+                    bench = out
+                except Exception as e:
+                    bench = {"error": str(e)[:100]}
+
+            q.put(("f", data, iw, ih, sw, sh, t_capture, t_encode, bench))
+            bench = None
         except Exception as e:
-            with LOCK:
-                STATE["backend"] = "quartz-error: " + str(e)[:80]
+            q.put(("err", str(e)[:200]))
             time.sleep(1)
-            continue
         dt = time.time() - t
         if dt < interval:
             time.sleep(interval - dt)
 
 
-def capture_subprocess():
-    """Fallback: screencapture por proceso."""
-    interval = 1.0 / max(1, FPS // 4)
+def capture_subprocess_worker(q, fps):
+    """Fallback sin pyobjc: screencapture por proceso."""
+    interval = 1.0 / max(1, fps // 4)
     while True:
         run_via_bash("/usr/sbin/screencapture -x -t jpg " + SHOT, timeout=20)
         try:
             with open(SHOT, "rb") as f:
-                _publish(f.read())
+                data = f.read()
+            if data:
+                q.put(("f", data, 1024, 768, 1024, 768, 0.0, 0.0, None))
         except Exception:
             pass
         time.sleep(interval)
+
+
+# ---------------------------------------------------------------- servidor
+
+def publish(data, iw, ih, sw, sh, t_capture, t_encode, bench):
+    with LOCK:
+        STATE["data"] = data
+        STATE["mtime"] = time.time()
+        STATE["seq"] += 1
+        STATE["iw"], STATE["ih"] = iw, ih
+        STATE["sw"], STATE["sh"] = sw, sh
+        n = STATE["n"] + 1
+        STATE["n"] = n
+        a = n - 1
+        STATE["t_capture"] = (STATE["t_capture"] * a + t_capture) / n
+        STATE["t_encode"] = (STATE["t_encode"] * a + t_encode) / n
+        if bench:
+            STATE["bench"] = bench
+
+
+def consumer(q):
+    """Hilo del padre: consume los frames del hijo y los publica."""
+    frames = 0
+    t0 = time.time()
+    while True:
+        try:
+            msg = q.get(timeout=1)
+        except Exception:
+            msg = None
+        if msg:
+            if msg[0] == "err":
+                with LOCK:
+                    STATE["backend"] = "error: " + msg[1]
+                continue
+            _, data, iw, ih, sw, sh, tc, te, bench = msg
+            publish(data, iw, ih, sw, sh, tc, te, bench)
+            frames += 1
+        el = time.time() - t0
+        if el >= 1:
+            with LOCK:
+                STATE["fps"] = frames / el
+            frames = 0
+            t0 = time.time()
 
 
 def cliclick(*args):
@@ -241,9 +243,9 @@ def cliclick(*args):
 
 def handle_event(ev):
     kind = ev.get("kind")
-    # El navegador envia coordenadas en pixeles de la IMAGEN que ve.
-    # Las convertimos a pixeles de PANTALLA, que pueden diferir si la
-    # captura esta escalada o si se cambio la resolucion.
+    # El navegador envia coordenadas en pixeles de la IMAGEN que ve; las
+    # convertimos a pixeles de PANTALLA (pueden diferir si se escalo o si
+    # cambio la resolucion).
     with LOCK:
         iw = STATE["iw"] or 1
         ih = STATE["ih"] or 1
@@ -280,10 +282,10 @@ HTML = """<!doctype html>
   html,body{margin:0;height:100%;background:#08080c;color:#ddd;
             font:13px system-ui;overflow:hidden}
   #stage{position:absolute;inset:4px;display:flex;align-items:center;
-         justify-content:center}
+         justify-content:center;overflow:hidden}
   img{max-width:100%;max-height:100%;width:auto;height:auto;display:block;
-      image-rendering:auto;user-select:none;cursor:crosshair;
-      border:1px solid #2b2b33;box-shadow:0 0 30px #000}
+      object-fit:contain;image-rendering:auto;user-select:none;
+      cursor:crosshair;border:1px solid #2b2b33;box-shadow:0 0 30px #000}
   #mk{position:absolute;width:16px;height:16px;margin:-8px 0 0 -8px;
       border:2px solid #ff3b30;border-radius:50%;display:none;
       pointer-events:none;box-shadow:0 0 6px #000}
@@ -292,13 +294,12 @@ HTML = """<!doctype html>
   #bar{position:fixed;bottom:8px;left:10px;background:#000b;padding:5px 11px;
        border-radius:6px;font-size:11px}
 </style></head><body>
-<div id="stage"><div id="wrap" style="position:relative;display:flex;align-items:center;justify-content:center">
-  <img id="s" src="/stream.mjpeg"><div id="mk"></div></div></div>
+<div id="stage"><img id="s" src="/stream.mjpeg"><div id="mk"></div></div>
 <div id="hud">macOS 26</div>
 <div id="bar">raton: clic / arrastrar &nbsp;|&nbsp; teclado: escribe en la pagina &nbsp;|&nbsp; <span id="fps">-</span> fps</div>
 <script>
 const img=document.getElementById('s'), hud=document.getElementById('hud');
-const mk=document.getElementById('mk');
+const mk=document.getElementById('mk'), stage=document.getElementById('stage');
 let W=1024,H=768,lastMove=0;
 function refreshInfo(){fetch('/info').then(r=>r.json()).then(j=>{
   W=j.width;H=j.height;
@@ -309,11 +310,11 @@ function pos(e){const r=img.getBoundingClientRect();
   if(!r.width||!r.height) return {x:0,y:0};
   return {x:Math.max(0,Math.min(W-1,Math.round((e.clientX-r.left)/r.width*W))),
           y:Math.max(0,Math.min(H-1,Math.round((e.clientY-r.top)/r.height*H)))};}
-function mark(e){const r=img.getBoundingClientRect();
-  if(!r.width||!r.height)return;
+function mark(e){const sr=stage.getBoundingClientRect();
+  if(!sr.width||!sr.height)return;
   mk.style.display='block';
-  mk.style.left=(e.clientX-r.left)+'px';
-  mk.style.top=(e.clientY-r.top)+'px';}
+  mk.style.left=(e.clientX-sr.left)+'px';
+  mk.style.top=(e.clientY-sr.top)+'px';}
 function send(ev){fetch('/event',{method:'POST',headers:{'Content-Type':'application/json'},
   body:JSON.stringify(ev)}).catch(()=>{});}
 img.addEventListener('mousemove',e=>{const now=Date.now();if(now-lastMove<50)return;
@@ -390,10 +391,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             with LOCK:
                 fps = STATE["fps"]
                 backend = STATE["backend"]
-                iw = STATE["iw"]
-                ih = STATE["ih"]
-                sw = STATE["sw"]
-                sh = STATE["sh"]
+                iw, ih = STATE["iw"], STATE["ih"]
+                sw, sh = STATE["sw"], STATE["sh"]
             self._send(200, json.dumps({"width": iw, "height": ih,
                                         "screen_w": sw, "screen_h": sh,
                                         "fps": round(fps, 1), "backend": backend}),
@@ -405,9 +404,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     "frames": STATE["n"],
                     "ms_capture": round(STATE["t_capture"], 2),
                     "ms_encode": round(STATE["t_encode"], 2),
-                    "ms_publish": round(STATE["t_publish"], 2),
-                    "ms_total": round(STATE["t_capture"] + STATE["t_encode"]
-                                      + STATE["t_publish"], 2),
+                    "ms_total": round(STATE["t_capture"] + STATE["t_encode"], 2),
                     "cpu_count": os.cpu_count(),
                     "fps": round(STATE["fps"], 1),
                     "backend": STATE["backend"],
@@ -441,15 +438,28 @@ class Server(socketserver.ThreadingTCPServer):
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "6081"))
-    if QUARTZ:
+    ctx = mp.get_context("spawn")
+    q = ctx.Queue(maxsize=3)
+    proc = None
+    try:
+        proc = ctx.Process(target=capture_worker, args=(q, FPS, QUALITY), daemon=True)
+        proc.start()
+        time.sleep(4)
+        if not proc.is_alive():
+            proc = None
+    except Exception as e:
+        proc = None
+    if proc is not None:
         with LOCK:
-            STATE["backend"] = "coregraphics"
-        threading.Thread(target=capture_quartz, daemon=True).start()
+            STATE["backend"] = "coregraphics (proceso hijo)"
+        threading.Thread(target=consumer, args=(q,), daemon=True).start()
     else:
         with LOCK:
-            STATE["backend"] = "screencapture (sin pyobjc: " + _QUARTZ_ERR[:60] + ")"
-        threading.Thread(target=capture_subprocess, daemon=True).start()
-    time.sleep(4)
-    print(f"webdesktop: {SCREEN['w']}x{SCREEN['h']} target={FPS}fps "
+            STATE["backend"] = "screencapture (fallback)"
+        p2 = ctx.Process(target=capture_subprocess_worker, args=(q, FPS), daemon=True)
+        p2.start()
+        threading.Thread(target=consumer, args=(q,), daemon=True).start()
+    time.sleep(3)
+    print(f"webdesktop: {STATE['iw']}x{STATE['ih']} target={FPS}fps "
           f"backend={STATE['backend']} cliclick={CLICLICK}", flush=True)
     Server(("127.0.0.1", port), Handler).serve_forever()
