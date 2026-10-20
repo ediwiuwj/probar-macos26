@@ -126,11 +126,28 @@ def capture_worker(q, fps, quality):
         return
 
     did = CGMainDisplayID()
-    interval = 1.0 / max(1.0, fps)
+    interval = 1.0 / max(1.0, fps) if fps > 0 else 0.0
+    # Tasa de refresco del display virtual: si es baja, ES el techo de fps.
+    try:
+        from Quartz import (CGDisplayCopyDisplayMode,
+                            CGDisplayModeGetRefreshRate,
+                            CGDisplayModeGetPixelWidth,
+                            CGDisplayModeGetPixelHeight)
+        mode = CGDisplayCopyDisplayMode(did)
+        rr = float(CGDisplayModeGetRefreshRate(mode)) if mode else 0.0
+        mw = int(CGDisplayModeGetPixelWidth(mode)) if mode else 0
+        mh = int(CGDisplayModeGetPixelHeight(mode)) if mode else 0
+    except Exception:
+        rr, mw, mh = 0.0, 0, 0
+    q.put(("meta", rr, mw, mh))
     n = 0
     bench = None
+    t_prev = time.time()
     while True:
         t = time.time()
+        # Tiempo de ciclo completo (incluye sleep y bloqueo en put).
+        ms_iter = (t - t_prev) * 1000
+        t_prev = t
         try:
             t0c = time.time()
             img = CGDisplayCreateImage(did)
@@ -214,7 +231,7 @@ def capture_worker(q, fps, quality):
                 except Exception as e:
                     bench = {"error": str(e)[:100]}
 
-            q.put(("f", data, iw, ih, sw, sh, t_capture, t_encode, bench))
+            q.put(("f", data, iw, ih, sw, sh, t_capture, t_encode, bench, ms_iter))
             bench = None
         except Exception as e:
             q.put(("err", str(e)[:200]))
@@ -222,7 +239,6 @@ def capture_worker(q, fps, quality):
         dt = time.time() - t
         if dt < interval:
             time.sleep(interval - dt)
-
 
 def capture_subprocess_worker(q, fps):
     """Fallback sin pyobjc: screencapture por proceso."""
@@ -241,7 +257,7 @@ def capture_subprocess_worker(q, fps):
 
 # ---------------------------------------------------------------- servidor
 
-def publish(data, iw, ih, sw, sh, t_capture, t_encode, bench):
+def publish(data, iw, ih, sw, sh, t_capture, t_encode, bench, ms_iter=0.0):
     with LOCK:
         STATE["data"] = data
         STATE["mtime"] = time.time()
@@ -253,6 +269,7 @@ def publish(data, iw, ih, sw, sh, t_capture, t_encode, bench):
         a = n - 1
         STATE["t_capture"] = (STATE["t_capture"] * a + t_capture) / n
         STATE["t_encode"] = (STATE["t_encode"] * a + t_encode) / n
+        STATE["t_iter"] = (STATE.get("t_iter", 0.0) * a + ms_iter) / n
         if bench:
             STATE["bench"] = bench
 
@@ -271,8 +288,14 @@ def consumer(q):
                 with LOCK:
                     STATE["backend"] = "error: " + msg[1]
                 continue
-            _, data, iw, ih, sw, sh, tc, te, bench = msg
-            publish(data, iw, ih, sw, sh, tc, te, bench)
+            if msg[0] == "meta":
+                with LOCK:
+                    STATE["refresh_hz"] = msg[1]
+                    STATE["mode_w"] = msg[2]
+                    STATE["mode_h"] = msg[3]
+                continue
+            _, data, iw, ih, sw, sh, tc, te, bench, msi = msg
+            publish(data, iw, ih, sw, sh, tc, te, bench, msi)
             frames += 1
         el = time.time() - t0
         if el >= 1:
@@ -458,6 +481,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._send(200, json.dumps({"width": iw, "height": ih,
                                         "screen_w": sw, "screen_h": sh,
                                         "scale": read_scale(),
+                                        "refresh_hz": STATE.get("refresh_hz", 0),
+                                        "ms_iter": round(STATE.get("t_iter", 0), 2),
                                         "fps": round(fps, 1), "backend": backend}),
                        "application/json")
         elif path == "/profile":
@@ -468,6 +493,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     "ms_capture": round(STATE["t_capture"], 2),
                     "ms_encode": round(STATE["t_encode"], 2),
                     "ms_total": round(STATE["t_capture"] + STATE["t_encode"], 2),
+                    "ms_iter": round(STATE.get("t_iter", 0), 2),
+                    "refresh_hz": STATE.get("refresh_hz", 0),
+                    "mode": [STATE.get("mode_w", 0), STATE.get("mode_h", 0)],
                     "cpu_count": os.cpu_count(),
                     "fps": round(STATE["fps"], 1),
                     "backend": STATE["backend"],
