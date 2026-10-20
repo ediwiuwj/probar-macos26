@@ -305,6 +305,79 @@ def consumer(q):
             t0 = time.time()
 
 
+try:
+    from Quartz import (
+        CGEventCreateMouseEvent, CGEventCreateScrollWheelEvent, CGEventPost,
+        CGEventSetIntegerValueField, kCGHIDEventTap, kCGEventMouseMoved,
+        kCGEventLeftMouseDown, kCGEventLeftMouseUp, kCGEventLeftMouseDragged,
+        kCGEventRightMouseDown, kCGEventRightMouseUp,
+        kCGEventOtherMouseDown, kCGEventOtherMouseUp,
+        kCGEventScrollWheel, kCGScrollEventUnitLine, kCGMouseButtonLeft,
+        kCGMouseButtonRight, kCGMouseButtonCenter, kCGMouseEventClickState,
+    )
+    CG_OK = True
+except Exception as _cg_err:  # pragma: no cover
+    CG_OK = False
+    _CG_ERR = str(_cg_err)
+
+BTN = {"left": False}
+
+
+def cg_mouse(kind, x, y):
+    """Inyecta el raton con CoreGraphics: sin procesos, latencia ~microsegundos.
+    Es lo que hace fluidos los arrastres (cliclick tarda ~100ms por evento)."""
+    if not CG_OK:
+        return False
+    try:
+        if kind == "move":
+            et = kCGEventLeftMouseDragged if BTN["left"] else kCGEventMouseMoved
+            ev = CGEventCreateMouseEvent(None, et, (x, y), kCGMouseButtonLeft)
+        elif kind == "down":
+            ev = CGEventCreateMouseEvent(None, kCGEventLeftMouseDown, (x, y),
+                                        kCGMouseButtonLeft)
+            BTN["left"] = True
+        elif kind == "up":
+            ev = CGEventCreateMouseEvent(None, kCGEventLeftMouseUp, (x, y),
+                                        kCGMouseButtonLeft)
+            BTN["left"] = False
+        elif kind == "right":
+            d = CGEventCreateMouseEvent(None, kCGEventRightMouseDown, (x, y),
+                                        kCGMouseButtonRight)
+            u = CGEventCreateMouseEvent(None, kCGEventRightMouseUp, (x, y),
+                                        kCGMouseButtonRight)
+            CGEventSetIntegerValueField(d, kCGMouseEventClickState, 1)
+            CGEventSetIntegerValueField(u, kCGMouseEventClickState, 1)
+            CGEventPost(kCGHIDEventTap, d)
+            CGEventPost(kCGHIDEventTap, u)
+            return True
+        elif kind == "middle":
+            d = CGEventCreateMouseEvent(None, kCGEventOtherMouseDown, (x, y),
+                                        kCGMouseButtonCenter)
+            u = CGEventCreateMouseEvent(None, kCGEventOtherMouseUp, (x, y),
+                                        kCGMouseButtonCenter)
+            CGEventPost(kCGHIDEventTap, d)
+            CGEventPost(kCGHIDEventTap, u)
+            return True
+        else:
+            return False
+        CGEventSetIntegerValueField(ev, kCGMouseEventClickState, 1)
+        CGEventPost(kCGHIDEventTap, ev)
+        return True
+    except Exception:
+        return False
+
+
+def cg_scroll(n):
+    if not CG_OK:
+        return False
+    try:
+        ev = CGEventCreateScrollWheelEvent(None, kCGScrollEventUnitLine, 1, int(n))
+        CGEventPost(kCGHIDEventTap, ev)
+        return True
+    except Exception:
+        return False
+
+
 def cliclick(*args):
     if not CLICLICK:
         return
@@ -326,17 +399,25 @@ def handle_event(ev):
     x = int(round(x_img * sw / iw))
     y = int(round(y_img * sh / ih))
     if kind == "move":
-        cliclick(f"m:{x},{y}")
+        if not cg_mouse("move", x, y):
+            cliclick(f"m:{x},{y}")
     elif kind == "down":          # boton izquierdo: inicio de arrastre
-        cliclick(f"dd:{x},{y}")
+        if not cg_mouse("down", x, y):
+            cliclick(f"dd:{x},{y}")
     elif kind == "up":            # boton izquierdo: fin de arrastre
-        cliclick(f"du:{x},{y}")
-    elif kind == "right":         # boton derecho
-        cliclick(f"rc:{x},{y}")
+        if not cg_mouse("up", x, y):
+            cliclick(f"du:{x},{y}")
+    elif kind == "right":
+        if not cg_mouse("right", x, y):
+            cliclick(f"rc:{x},{y}")
     elif kind == "middle":
-        cliclick(f"mc:{x},{y}")
+        if not cg_mouse("middle", x, y):
+            cliclick(f"mc:{x},{y}")
     elif kind == "dblclick":
-        cliclick(f"dc:{x},{y}")
+        if not cg_mouse("down", x, y):
+            cliclick(f"dc:{x},{y}")
+        else:
+            cg_mouse("up", x, y)
     elif kind == "key":
         k = ev.get("key", "space")
         cliclick("kp:" + KEYMAP.get(k, k))
@@ -345,12 +426,12 @@ def handle_event(ev):
         if t:
             cliclick("t:" + t)
     elif kind == "scroll":
-        # deltaY > 0 en el navegador = el usuario hace scroll hacia ABAJO,
-        # que en macOS es rueda hacia abajo (wd).
+        # deltaY > 0 en el navegador = scroll hacia ABAJO = rueda abajo en macOS.
         dy = float(ev.get("dy", 0))
         n = int(ev.get("n", 1)) or 1
         if dy:
-            cliclick(("wd:" if dy > 0 else "wu:") + str(n))
+            if not cg_scroll(n if dy > 0 else -n):
+                cliclick(("wd:" if dy > 0 else "wu:") + str(n))
 
 
 HTML = """<!doctype html>
@@ -373,7 +454,7 @@ HTML = """<!doctype html>
   #bar{position:fixed;bottom:8px;left:10px;background:#000b;padding:5px 11px;
        border-radius:6px;font-size:11px}
 </style></head><body>
-<div id="stage"><img id="s" src="/stream.mjpeg"><div id="mk"></div></div>
+<div id="stage"><img id="s" src="/stream.mjpeg" draggable="false"><div id="mk"></div></div>
 <div id="hud">macOS 26</div>
 <div id="bar">raton: clic / arrastrar &nbsp;|&nbsp; teclado: escribe en la pagina &nbsp;|&nbsp; <span id="fps">-</span> fps</div>
 <script>
@@ -396,7 +477,7 @@ function mark(e){const sr=stage.getBoundingClientRect();
   mk.style.top=(e.clientY-sr.top)+'px';}
 function send(ev){fetch('/event',{method:'POST',headers:{'Content-Type':'application/json'},
   body:JSON.stringify(ev)}).catch(()=>{});}
-img.addEventListener('mousemove',e=>{const now=Date.now();if(now-lastMove<50)return;
+img.addEventListener('mousemove',e=>{const now=Date.now();if(now-lastMove<16)return;
   lastMove=now;send({kind:'move',...pos(e)});});
 img.addEventListener('mousedown',e=>{e.preventDefault();mark(e);
   const p=pos(e);
@@ -405,8 +486,6 @@ img.addEventListener('mousedown',e=>{e.preventDefault();mark(e);
   else                  send({kind:'down',...p});});
 window.addEventListener('mouseup',e=>{
   if(e.button===0) send({kind:'up',...pos(e)});});
-img.addEventListener('dblclick',e=>{e.preventDefault();
-  send({kind:'dblclick',...pos(e)});});
 img.addEventListener('contextmenu',e=>e.preventDefault());
 img.addEventListener('wheel',e=>{e.preventDefault();
   const dy=e.deltaY, n=Math.max(1,Math.min(10,Math.round(Math.abs(dy)/100)||1));
@@ -498,6 +577,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._send(200, json.dumps({"width": iw, "height": ih,
                                         "screen_w": sw, "screen_h": sh,
                                         "scale": read_scale(),
+                                        "input": "coregraphics" if CG_OK else "cliclick",
                                         "refresh_hz": STATE.get("refresh_hz", 0),
                                         "ms_iter": round(STATE.get("t_iter", 0), 2),
                                         "fps": round(fps, 1), "backend": backend}),
