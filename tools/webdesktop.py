@@ -33,6 +33,10 @@ STATE = {"data": b"", "mtime": 0.0, "seq": 0, "fps": 0.0, "backend": "?",
          "t_capture": 0.0, "t_encode": 0.0, "t_publish": 0.0, "n": 0,
          "bench": {}}
 LOCK = threading.Lock()
+# Condicion para que el hilo que sirve el stream ESPERE de forma eficiente
+# cuando no hay frames nuevos. Un sleep() aqui cuesta 20-40 ms de despertar
+# en una maquina de 3 vCPUs y limita el stream a ~28 fps.
+FRAMES_CV = threading.Condition()
 SCREEN = {"w": 1024, "h": 768}
 FPS = float(os.environ.get("FPS", "30"))
 QUALITY = float(os.environ.get("QUALITY", "0.35"))
@@ -272,6 +276,8 @@ def publish(data, iw, ih, sw, sh, t_capture, t_encode, bench, ms_iter=0.0):
         STATE["t_iter"] = (STATE.get("t_iter", 0.0) * a + ms_iter) / n
         if bench:
             STATE["bench"] = bench
+    with FRAMES_CV:
+        FRAMES_CV.notify_all()
 
 
 def consumer(q):
@@ -529,6 +535,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
         last_seq = -1
         try:
             while True:
+                # Espera eficiente: se bloquea hasta que haya frame nuevo.
+                # (sin sleep: dormir 5ms cuesta ~30ms de despertar aqui)
+                with FRAMES_CV:
+                    while True:
+                        with LOCK:
+                            seq = STATE["seq"]
+                        if seq != last_seq:
+                            break
+                        FRAMES_CV.wait(timeout=0.5)
                 with LOCK:
                     data = STATE["data"]
                     seq = STATE["seq"]
@@ -540,7 +555,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     self.wfile.write(data)
                     self.wfile.write(b"\r\n")
                     self.wfile.flush()
-                time.sleep(0.005)
         except Exception:
             pass
 
