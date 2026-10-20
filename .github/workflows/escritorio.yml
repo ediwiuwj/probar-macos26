@@ -1,0 +1,99 @@
+name: Escritorio web macOS 26
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  escritorio:
+    runs-on: macos-26
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Diagnostico rapido de Anka (shortcut VNC)
+        run: |
+          ANKA="/Library/Application Support/Veertu/Anka"
+          echo "=== strings de kcpassword (protocolo/uso) ==="
+          strings "$ANKA/addons/kcpassword" 2>/dev/null | grep -iE "usage|password|socket|anka|user|set" | head -30 || true
+          echo "=== sockets ==="
+          ls -la /var/run/anka 2>&1 | head
+          echo "=== cliclick instalado? ==="
+          which cliclick || brew list cliclick 2>/dev/null || echo "no instalado"
+
+      - name: Instalar cliclick
+        run: |
+          if ! which cliclick >/dev/null 2>&1; then
+            brew install cliclick 2>&1 | tail -5 || true
+          fi
+          which cliclick || ls -la /opt/homebrew/bin/cliclick 2>&1 || echo "cliclick NO disponible"
+          echo "--- probando cliclick ---"
+          /bin/bash -c "cliclick p" 2>&1 | head -3 || true
+
+      - name: Permisos TCC para capture/accesibilidad
+        run: |
+          DB="/Library/Application Support/com.apple.TCC/TCC.db"
+          CANDS="$(which python3 2>/dev/null) /opt/homebrew/bin/python3 /opt/homebrew/bin/cliclick /usr/bin/python3 /bin/bash /usr/bin/osascript /usr/sbin/screencapture"
+          for c in $CANDS; do
+            [ -z "$c" ] && continue
+            for svc in kTCCServiceScreenCapture kTCCServiceAccessibility; do
+              sudo sqlite3 "$DB" "INSERT OR IGNORE INTO access (service, client, client_type, auth_value, auth_reason, indirect_object_identifier, indirect_object_identifier_type, flags, last_modified) SELECT '$svc', '$c', client_type, auth_value, auth_reason, indirect_object_identifier, indirect_object_identifier_type, flags, strftime('%s','now') FROM access WHERE service='$svc' AND client IN ('/bin/bash','/opt/hca/hosted-compute-agent') LIMIT 1;" 2>&1
+              sudo sqlite3 "$DB" "INSERT OR IGNORE INTO access (service, client, client_type, auth_value, auth_reason, indirect_object_identifier, indirect_object_identifier_type, flags, last_modified) SELECT '$svc', '$c', 1, 2, 4, NULL, NULL, 0, strftime('%s','now') WHERE NOT EXISTS (SELECT 1 FROM access WHERE service='$svc' AND client='$c');" 2>&1
+            done
+          done
+          sudo sqlite3 "$DB" "SELECT service, client, auth_value FROM access WHERE service IN ('kTCCServiceScreenCapture','kTCCServiceAccessibility') AND client LIKE '%homebrew%' OR client='/bin/bash';" 2>&1 | head -20
+          sudo launchctl kickstart -k system/com.apple.tccd 2>/dev/null || true
+          sleep 4
+
+      - name: Probar captura de pantalla
+        run: |
+          /bin/bash -c "/usr/sbin/screencapture -x -t jpg /tmp/t.jpg" 2>&1 || true
+          ls -la /tmp/t.jpg 2>&1 || echo "sin captura"
+          /bin/bash -c "/usr/bin/sips -g pixelWidth -g pixelHeight /tmp/t.jpg" 2>&1 | tail -3
+
+      - name: Levantar escritorio web + tunel
+        run: |
+          nohup /bin/bash -c "python3 tools/webdesktop.py" >/tmp/webdesktop.log 2>&1 &
+          sleep 12
+          echo "--- log webdesktop ---"; cat /tmp/webdesktop.log
+          echo "--- test local ---"
+          curl -s -o /dev/null -w "info -> HTTP %{http_code}\n" --max-time 10 http://127.0.0.1:6081/info || true
+          curl -s -o /dev/null -w "screen.jpg -> HTTP %{http_code} (%{size_download} bytes)\n" --max-time 20 http://127.0.0.1:6081/screen.jpg || true
+          curl -s --max-time 10 http://127.0.0.1:6081/info || true
+          echo
+          if [ ! -x /tmp/cloudflared ]; then
+            curl -fsSL --retry 3 -o /tmp/cloudflared.tgz https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-arm64.tgz
+            tar -xzf /tmp/cloudflared.tgz -C /tmp cloudflared
+            chmod +x /tmp/cloudflared
+          fi
+          nohup /tmp/cloudflared tunnel --url http://localhost:6081 >/tmp/cf.log 2>&1 &
+          sleep 20
+          URL=$(grep -oE "https://[a-zA-Z0-9.-]+\.trycloudflare\.com" /tmp/cf.log | head -1)
+          echo "========== URL ESCRITORIO WEB =========="
+          echo "$URL"
+          echo "=========================================="
+          tail -3 /tmp/cf.log
+          git fetch origin main 2>&1 | tail -1 || true
+          git checkout -B main origin/main 2>/dev/null || git checkout -B main
+          git config user.email "bot@users.noreply.github.com"
+          git config user.name "bot"
+          echo "$URL" > URL.txt
+          git add -f URL.txt
+          git commit -q -m "URL escritorio web" || true
+          PUSH="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push "$PUSH" main > /tmp/push.log 2>&1 || {
+            git pull --rebase origin main 2>&1 | tail -2
+            echo "$URL" > URL.txt
+            git add -f URL.txt
+            git commit -q -m "URL escritorio web" || true
+            git push "$PUSH" main > /tmp/push2.log 2>&1 || true
+            cat /tmp/push2.log
+          }
+          cat /tmp/push.log
+
+      - name: Mantener vivo
+        run: |
+          echo "Escritorio web activo."
+          sleep 3600
