@@ -1,0 +1,130 @@
+################ 1. BUSCAR LA PASSWORD DE LA CUENTA ################
+--- keychain System: com.apple.loginwindow ---
+security: SecKeychainSearchCopyNext: The specified item could not be found in the keychain.
+--- keychain login del usuario ---
+security: SecKeychainSearchCopyNext: The specified item could not be found in the keychain.
+--- cualquier generic-password de runner en System.keychain ---
+--- lista de entradas del keychain de sistema (servicios) ---
+    "svce"<blob>="BluetoothGlobal"
+
+--- dscl: borrar _writers_passwd y reintentar ---
+Permission denied. Please enter user's old password:<dscl_cmd> DS Error: -14090 (eDSAuthFailed)
+passwd: DS error: eDSAuthFailed
+--- verificar ---
+<dscl_cmd> DS Error: -14090 (eDSAuthFailed)
+Authentication for node /Local/Default failed. (-14090, eDSAuthFailed)
+PASSWORD macos26: INCORRECTA
+
+--- dscl: pasar old vacio + nuevo ---
+<dscl_cmd> DS Error: -14090 (eDSAuthFailed)
+passwd: DS error: eDSAuthFailed
+<dscl_cmd> DS Error: -14090 (eDSAuthFailed)
+Authentication for node /Local/Default failed. (-14090, eDSAuthFailed)
+PASSWORD macos26: INCORRECTA
+
+--- volcado completo del registro runner (buscando pistas) ---
+dsAttrTypeNative:_writers_AvatarRepresentation: runner
+dsAttrTypeNative:_writers_hint: runner
+dsAttrTypeNative:_writers_inputSources: runner
+dsAttrTypeNative:_writers_jpegphoto: runner
+dsAttrTypeNative:_writers_picture: runner
+dsAttrTypeNative:_writers_unlockOptions: runner
+dsAttrTypeNative:_writers_UserCertificate: runner
+dsAttrTypeNative:accountPolicyData:
+ <?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>creationTime</key>
+	<real>1789358588.8624139</real>
+	<key>failedLoginCount</key>
+	<integer>2</integer>
+	<key>failedLoginTimestamp</key>
+	<real>1792528843.6690011</real>
+	<key>passwordLastSetTime</key>
+	<real>1792528811.866894</real>
+</dict>
+</plist>
+
+dsAttrTypeNative:AvatarRepresentation: 
+dsAttrTypeNative:HeimdalSRPKey:
+ 3082022b a0820204 04820200 c716be22 bafb18f8 a2c32a19 b1389b24 9ba3d692 0726158f 96d3d351 86cc9d9e 23a2c849 07d0ef6e 29a3b1dc c813e52c dcdbdf58 21140229 b0df89dd ccbc70f2 4641a36d e9b97f32 4282e619 0f6128cf bc7b8728 f9e3ae2d 300cc024 29dba11f 7ac9b727 f9a0ecb3 67cb5323 38bf6b51 f021467f 3eea067a db84d7e5 8d20963b 5bc17cdf 9b114e7b c0d8e1f0 988414e4 9fa84751 9a1de468 f063ce65 32bfa2a4 6ef5217d 8c9f351a 0964ce71 b5b83557 be440750 1ecedf4f 9850404c 0139d451 4966090d ba5ed6ff 1117b559 48315fa5 08b82b3c 3da1ced4 da1dedb4 08294b2a d6155e35 38bd5418 96835274 9c99f17d 41f9057d 5d8749d3 0de14937 16e13194 32bc7164 a35bbfea f52ef828 ffc71a79 628f484a c0457bac ea3678d4 8b0b3d4c 846c2863 f25764ba 823a4d96 c09b37c3 20cc8c5f dc9ae898 c0df5d32 c2703ba5 23c2666e bbd70c39 d916f539 4263e808 510610c1 b83516d6 4fb43773 47aca843 76a5b450 e9edac2e f586c086 48e89627 8ddd9af7 245fd557 b49b8a97 ea5f5f60 a7fcbd7e 070118c0 ed96fd46 6855603a 3f57dcc5 6f4dfe47 d5aeff5b adc958d0 fa167e7a baac0cd6 d8a05b4a b7702b11 6fc3e2ce 50ef7e87 a3e52db0 fb96a78a 7e9e928d 750bb8e6 08515ee2 2557374e 17099fd0 7c43f7ad fb8d7742 069fb6ef b66b5ac8 df1c9047 879f53a9 112e2273 f5acca7e 3afcfd20 26643d3f 8198cb55 a121301f a0030201 01a11204 106e9759 21ce34d8 cc10dac7 30cac8af 61a20402 020fa0
+dsAttrTypeNative:inputSources:
+ <?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<array>
+	<dict>
+		<key>InputSourceKind</key>
+		<string>Keyboard Layout</string>
+		<key>KeyboardLayout ID</key>
+		<integer>0</integer>
+		<key>KeyboardLayout Name</key>
+		<string>U.S.</string>
+	</dict>
+</array>
+
+--- kcpassword / autoLogin en prefs ---
+{
+    AccountInfo =     {
+        FirstLogins =         {
+            runner = 1;
+        };
+        MaximumUsers = 1;
+        OnConsole =         {
+        };
+    };
+    GuestEnabled = 0;
+    OptimizerPreviousBuild = 25G83;
+    RecentUsers =     (
+        runner
+    );
+    UseVoiceOverLegacyMigrated = 1;
+    autoLoginUser = runner;
+    autoLoginUserScreenLocked = 0;
+    lastUser = loggedIn;
+    lastUserName = runner;
+}
+
+--- variables de entorno / ficheros de provision con PASSWORD ---
+/Users/runner/actions-runner/extracted/_diag/blocks/a0d83505-53d4-4901-8656-e868c9b64616_e3bf8e57-cd41-454f-80f4-bbecfa924b47.1
+/Users/runner/actions-runner/extracted/_diag/blocks/a0d83505-53d4-4901-8656-e868c9b64616_1a74bc92-5a11-5f38-a516-918321669824.1
+/Users/runner/actions-runner/extracted/_diag/pages/a0d83505-53d4-4901-8656-e868c9b64616_1a74bc92-5a11-5f38-a516-918321669824_1.log
+/Users/runner/actions-runner/extracted/_diag/pages/a0d83505-53d4-4901-8656-e868c9b64616_e3bf8e57-cd41-454f-80f4-bbecfa924b47_1.log
+/Users/runner/actions-runner/extracted/_diag/Worker_20261020-204039-utc.log
+/Users/runner/work/_temp/6e475331-1cbc-42ff-bb68-e979890bb7b8.sh
+/Users/runner/work/probar-macos26/probar-macos26/.github/workflows/informe.yml
+/Library/Application Support/Veertu/Anka/lastupdid
+/Library/Application Support/Veertu/Anka/bin/libopencv_imgcodecs.413.dylib
+/Library/Application Support/Veertu/Anka/bin/click
+/Library/Application Support/Veertu/Anka/bin/libopencv_imgproc.413.dylib
+/Library/Application Support/Veertu/Anka/bin/libopencv_core.413.dylib
+/Library/Application Support/Veertu/Anka/addons/kcpassword
+/Library/Application Support/Veertu/Anka/addons/copypaste
+/Library/Application Support/Veertu/Anka/addons/uninstall.sh
+/Library/Application Support/Veertu/Anka/addons/ankacpd
+/Library/Application Support/Veertu/Anka/addons/ankaupd.sh
+/Library/Application Support/Veertu/Anka/addons/proxyd
+/Library/Application Support/Veertu/Anka/addons/ankarund
+/Library/Application Support/Veertu/Anka/addons/version.txt
+/Library/Application Support/Veertu/Anka/addons/addonsd
+/Library/Application Support/Veertu/Anka/addons/change_res
+
+################ 2. ESTADO DE PANTALLAS ################
+--- CoreGraphics displays via python ---
+Quartz no disponible: No module named 'Quartz'
+
+################ 3. VNC LEGACY + SONDA ################
+[31mScreen recording might be disabled. Screen Sharing or Remote Management must be enabled from System Settings or via MDM.
+[0m[31mScreen control might be disabled. Screen Sharing or Remote Management must be enabled from System Settings or via MDM.
+[0mActivated Remote Management.
+Stopped ARD Agent.
+runner: Set user remote control privileges.
+runner: Set user remote access.
+Set the client options.
+Done.
+--- password 'macos26' ---
+  security types: [30, 33, 36, 2, 35]
+  -> AUTENTICACION RECHAZADA: Authentication or authorization failure
+
+################ 4. FIN ################
