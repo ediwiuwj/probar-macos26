@@ -17,16 +17,6 @@ jobs:
           ls -la /tmp/shot.png 2>/dev/null || echo "sin captura"
           sips -g pixelWidth -g pixelHeight /tmp/shot.png 2>/dev/null || true
 
-      - name: Extraer imagen oficial de macOS 26 (forzado a 26.6)
-        run: |
-          echo "== softwareupdate --fetch-full-installer 26.6 =="
-          softwareupdate --fetch-full-installer --full-installer-version 26.6 --agree-to-license 2>&1 | tail -8 || true
-          echo
-          ls -la /Applications/ 2>/dev/null | grep -i "Install macOS" || echo "no se encontro instalador en /Applications"
-          echo
-          echo "== imagenes dentro del instalador =="
-          find /Applications -maxdepth 4 \( -iname "*.dmg" -o -iname "*.ipsw" \) 2>/dev/null | head -10 || true
-
       - name: Habilitar Screen Sharing (VNC)
         run: |
           sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
@@ -68,5 +58,20 @@ jobs:
 
       - name: Mantener vivo (conectate desde el navegador)
         run: |
-          echo "El tunel sigue activo. Puedes conectar mientras este job este en verde."
+          echo "El tunel sigue activo."
           sleep 3600
+
+  imagen:
+    runs-on: macos-26
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extraer imagen oficial de macOS 26 (forzado a 26.6)
+        run: |
+          echo "== softwareupdate --fetch-full-installer 26.6 =="
+          softwareupdate --fetch-full-installer --full-installer-version 26.6 --agree-to-license 2>&1 | tail -8 || true
+          echo
+          ls -la /Applications/ 2>/dev/null | grep -i "Install macOS" || echo "no se encontro instalador en /Applications"
+          echo
+          find /Applications -maxdepth 4 \( -iname "*.dmg" -o -iname "*.ipsw" \) 2>/dev/null | head -10 || true
