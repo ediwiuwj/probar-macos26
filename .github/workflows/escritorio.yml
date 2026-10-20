@@ -156,6 +156,9 @@ jobs:
           echo "--- test stream MJPEG (6s) ---"
           curl -s --max-time 6 -o /tmp/stream.bin -w "stream -> HTTP %{http_code} %{size_download} bytes\n" http://127.0.0.1:6081/stream.mjpeg || true
           grep -ac "Content-Type: image/jpeg" /tmp/stream.bin 2>/dev/null | head -1 | sed 's/^/frames en 6s: /'
+          echo "--- fps LOCAL (sin tunel) vs por el tunel ---"
+          curl -s --max-time 8 -o /tmp/loc.bin http://127.0.0.1:6081/stream.mjpeg || true
+          echo "  LOCAL  frames en 8s: $(grep -ac 'Content-Type: image/jpeg' /tmp/loc.bin 2>/dev/null)"
           if [ ! -x /tmp/cloudflared ]; then
             curl -fsSL --retry 3 -o /tmp/cloudflared.tgz https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-arm64.tgz
             tar -xzf /tmp/cloudflared.tgz -C /tmp cloudflared

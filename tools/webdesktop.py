@@ -17,12 +17,16 @@ Endpoints:
   GET  /profile       -> desglose de tiempos + benchmark del encoder
   POST /event         -> {kind: move|down|up|key|text|scroll, ...}
 """
+import base64
+import hashlib
 import http.server
 import json
 import multiprocessing as mp
 import os
 import shutil
+import socket
 import socketserver
+import struct
 import subprocess
 import threading
 import time
@@ -449,9 +453,9 @@ HTML = """<!doctype html>
             font:13px system-ui;overflow:hidden}
   #stage{position:absolute;inset:4px;display:flex;align-items:center;
          justify-content:center;overflow:hidden}
-  img{max-width:100%;max-height:100%;width:auto;height:auto;display:block;
-      object-fit:contain;image-rendering:auto;user-select:none;
-      cursor:crosshair;border:1px solid #2b2b33;box-shadow:0 0 30px #000}
+  #c,#s{max-width:100%;max-height:100%;width:auto;height:auto;display:block;
+        image-rendering:auto;user-select:none;cursor:crosshair;
+        border:1px solid #2b2b33;box-shadow:0 0 30px #000}
   #mk{position:absolute;width:16px;height:16px;margin:-8px 0 0 -8px;
       border:2px solid #ff3b30;border-radius:50%;display:none;
       pointer-events:none;box-shadow:0 0 6px #000}
@@ -460,49 +464,82 @@ HTML = """<!doctype html>
   #bar{position:fixed;bottom:8px;left:10px;background:#000b;padding:5px 11px;
        border-radius:6px;font-size:11px}
 </style></head><body>
-<div id="stage"><img id="s" src="/stream.mjpeg" draggable="false"><div id="mk"></div></div>
+<div id="stage"><canvas id="c" style="display:none"></canvas>
+  <img id="s" src="/stream.mjpeg" draggable="false"><div id="mk"></div></div>
 <div id="hud">macOS 26</div>
-<div id="bar">raton: clic / arrastrar &nbsp;|&nbsp; teclado: escribe en la pagina &nbsp;|&nbsp; <span id="fps">-</span> fps</div>
+<div id="bar">raton: clic / arrastrar / boton derecho &nbsp;|&nbsp; rueda &nbsp;|&nbsp;
+  teclado: escribe en la pagina &nbsp;|&nbsp; <span id="mode">...</span> &nbsp;|&nbsp;
+  <span id="fps">-</span> fps (cliente) / <span id="sfps">-</span> (servidor)</div>
 <script>
-const img=document.getElementById('s'), hud=document.getElementById('hud');
-const mk=document.getElementById('mk'), stage=document.getElementById('stage');
-let W=1024,H=768,lastMove=0;
+const stage=document.getElementById('stage'), mk=document.getElementById('mk');
+const cv=document.getElementById('c'), ctx=cv.getContext('2d');
+const img=document.getElementById('s');
+let W=1024,H=768,lastMove=0,ws=null,surface=img,frames=0,lastF=0,lastT=Date.now();
+const modeEl=document.getElementById('mode'), fpsEl=document.getElementById('fps'),
+      sfpsEl=document.getElementById('sfps');
 function refreshInfo(){fetch('/info').then(r=>r.json()).then(j=>{
-  W=j.width;H=j.height;
-  document.getElementById('fps').textContent=j.fps.toFixed(1);
+  W=j.width;H=j.height; sfpsEl.textContent=j.fps.toFixed(1);
 }).catch(()=>{});}
 refreshInfo(); setInterval(refreshInfo,500);
-function pos(e){const r=img.getBoundingClientRect();
-  if(!r.width||!r.height) return {x:0,y:0};
+setInterval(()=>{const n=frames,t=Date.now();
+  fpsEl.textContent=((n-lastF)/((t-lastT)/1000)).toFixed(1); lastF=n; lastT=t;},1000);
+function send(ev){
+  if(ws && ws.readyState===1){ws.send(JSON.stringify(ev));return;}
+  fetch('/event',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(ev)}).catch(()=>{});}
+function pos(e){const r=surface.getBoundingClientRect();
+  if(!r.width||!r.height)return {x:0,y:0};
   return {x:Math.max(0,Math.min(W-1,Math.round((e.clientX-r.left)/r.width*W))),
           y:Math.max(0,Math.min(H-1,Math.round((e.clientY-r.top)/r.height*H)))};}
 function mark(e){const sr=stage.getBoundingClientRect();
   if(!sr.width||!sr.height)return;
-  mk.style.display='block';
-  mk.style.left=(e.clientX-sr.left)+'px';
+  mk.style.display='block'; mk.style.left=(e.clientX-sr.left)+'px';
   mk.style.top=(e.clientY-sr.top)+'px';}
-function send(ev){fetch('/event',{method:'POST',headers:{'Content-Type':'application/json'},
-  body:JSON.stringify(ev)}).catch(()=>{});}
-img.addEventListener('mousemove',e=>{const now=Date.now();if(now-lastMove<16)return;
-  lastMove=now;send({kind:'move',...pos(e)});});
-img.addEventListener('mousedown',e=>{e.preventDefault();mark(e);
-  const p=pos(e);
-  if(e.button===2)      send({kind:'right',...p});
-  else if(e.button===1) send({kind:'middle',...p});
-  else                  send({kind:'down',...p});});
-window.addEventListener('mouseup',e=>{
-  if(e.button===0) send({kind:'up',...pos(e)});});
-img.addEventListener('contextmenu',e=>e.preventDefault());
-img.addEventListener('wheel',e=>{e.preventDefault();
-  const dy=e.deltaY, n=Math.max(1,Math.min(10,Math.round(Math.abs(dy)/100)||1));
-  send({kind:'scroll',dy:dy,n:n,...pos(e)});});
+function bind(el){
+  el.addEventListener('mousemove',e=>{const now=Date.now();if(now-lastMove<16)return;
+    lastMove=now;send({kind:'move',...pos(e)});});
+  el.addEventListener('mousedown',e=>{e.preventDefault();mark(e);const p=pos(e);
+    if(e.button===2)send({kind:'right',...p});
+    else if(e.button===1)send({kind:'middle',...p});
+    else send({kind:'down',...p});});
+  el.addEventListener('contextmenu',e=>e.preventDefault());
+  el.addEventListener('wheel',e=>{e.preventDefault();
+    const dy=e.deltaY,n=Math.max(1,Math.min(10,Math.round(Math.abs(dy)/100)||1));
+    send({kind:'scroll',dy:dy,n:n,...pos(e)});});
+}
+bind(img);
+window.addEventListener('mouseup',e=>{if(e.button===0)send({kind:'up',...pos(e)});});
 window.addEventListener('keydown',e=>{
-  if(e.key.length===1){send({kind:'text',text:e.key});}
-  else{send({kind:'key',key:e.key});}
-  e.preventDefault();
-});
+  if(e.key.length===1)send({kind:'text',text:e.key});
+  else send({kind:'key',key:e.key});
+  e.preventDefault();});
+function poll(){if(!ws||ws.readyState!==1)img.src='/stream.mjpeg?t='+Date.now();}
+setInterval(poll,400);
+(function(){
+  const proto=location.protocol==='https:'?'wss:':'ws:';
+  let opened=false;
+  try{ ws=new WebSocket(proto+'//'+location.host+'/ws'); }catch(e){ ws=null; return; }
+  ws.binaryType='arraybuffer';
+  ws.onopen=()=>{opened=true;cv.style.display='block';img.style.display='none';
+    surface=cv;bind(cv);modeEl.textContent='WebSocket';};
+  ws.onmessage=async(e)=>{frames++;
+    try{const bmp=await createImageBitmap(new Blob([e.data],{type:'image/jpeg'}));
+      if(cv.width!==bmp.width||cv.height!==bmp.height){cv.width=bmp.width;cv.height=bmp.height;}
+      ctx.drawImage(bmp,0,0);}catch(err){}};
+  ws.onerror=()=>{if(!opened){modeEl.textContent='MJPEG (fallback)';}};
+  ws.onclose=()=>{if(!opened){modeEl.textContent='MJPEG (fallback)';}};
+  setTimeout(()=>{if(!opened&&ws){try{ws.close();}catch(e){}}},3000);
+})();
 setInterval(()=>{hud.textContent='macOS 26 - '+new Date().toLocaleTimeString();},500);
 </script></body></html>"""
+
+
+WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+
+def ws_accept(key):
+    d = hashlib.sha1((key + WS_GUID).encode()).digest()
+    return base64.b64encode(d).decode()
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -558,9 +595,117 @@ class Handler(http.server.BaseHTTPRequestHandler):
         except Exception:
             pass
 
+    def _ws_send(self, payload):
+        n = len(payload)
+        hdr = bytearray([0x82])          # FIN + opcode binario
+        if n < 126:
+            hdr.append(n)
+        elif n < 65536:
+            hdr.append(126)
+            hdr += struct.pack(">H", n)
+        else:
+            hdr.append(127)
+            hdr += struct.pack(">Q", n)
+        self.wfile.write(bytes(hdr) + payload)
+        self.wfile.flush()
+
+    def _ws_reader(self, stop):
+        """Lee tramas WebSocket del cliente (enmascaradas) -> eventos de entrada."""
+        buf = b""
+        sock = self.connection
+        try:
+            sock.settimeout(0.5)
+        except Exception:
+            pass
+        while not stop.is_set():
+            try:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    break
+                buf += chunk
+            except socket.timeout:
+                continue
+            except Exception:
+                break
+            while len(buf) >= 2:
+                b0, b1 = buf[0], buf[1]
+                opcode = b0 & 0x0F
+                masked = b1 & 0x80
+                ln = b1 & 0x7F
+                off = 2
+                if ln == 126:
+                    if len(buf) < 4:
+                        break
+                    ln = struct.unpack(">H", buf[2:4])[0]
+                    off = 4
+                elif ln == 127:
+                    if len(buf) < 10:
+                        break
+                    ln = struct.unpack(">Q", buf[2:10])[0]
+                    off = 10
+                mask = b""
+                if masked:
+                    if len(buf) < off + 4:
+                        break
+                    mask = buf[off:off + 4]
+                    off += 4
+                if len(buf) < off + ln:
+                    break
+                payload = buf[off:off + ln]
+                buf = buf[off + ln:]
+                if masked and mask:
+                    payload = bytes(payload[i] ^ mask[i % 4]
+                                    for i in range(len(payload)))
+                if opcode == 8:          # close
+                    stop.set()
+                    return
+                if opcode == 1:          # texto -> JSON de entrada
+                    try:
+                        handle_event(json.loads(payload.decode("utf-8", "replace")))
+                    except Exception:
+                        pass
+
+    def _websocket(self):
+        """Transporte WebSocket: video (binario) + entrada (texto) en el mismo canal."""
+        key = self.headers.get("Sec-WebSocket-Key", "")
+        self.send_response(101, "Switching Protocols")
+        self.send_header("Upgrade", "websocket")
+        self.send_header("Connection", "Upgrade")
+        self.send_header("Sec-WebSocket-Accept", ws_accept(key))
+        self.end_headers()
+        self.close_connection = True
+        stop = threading.Event()
+        rt = threading.Thread(target=self._ws_reader, args=(stop,), daemon=True)
+        rt.start()
+        last_seq = -1
+        try:
+            while not stop.is_set():
+                with FRAMES_CV:
+                    while True:
+                        with LOCK:
+                            seq = STATE["seq"]
+                        if seq != last_seq:
+                            break
+                        FRAMES_CV.wait(timeout=0.5)
+                with LOCK:
+                    data = STATE["data"]
+                    seq = STATE["seq"]
+                if data and seq != last_seq:
+                    last_seq = seq
+                    self._ws_send(data)
+        except Exception:
+            pass
+        finally:
+            stop.set()
+
     def do_GET(self):
         path = self.path.split("?")[0]
-        if path in ("/", "/index.html"):
+        if path == "/ws":
+            if "websocket" in (self.headers.get("Upgrade", "") or "").lower():
+                self._websocket()
+            else:
+                self._send(400, b"upgrade required", "text/plain")
+        elif path in ("/", "/index.html"):
             self._send(200, HTML, "text/html; charset=utf-8")
         elif path == "/stream.mjpeg":
             self._stream()
