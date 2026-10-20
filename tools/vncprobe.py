@@ -66,8 +66,9 @@ def recvn(sock, n):
 
 def probe(pw, host="127.0.0.1", port=5900):
     key = pw.encode("latin-1")[:8].ljust(8, b"\0")
-    s = socket.create_connection((host, port), timeout=20)
+    s = socket.create_connection((host, port), timeout=6)
     try:
+        s.settimeout(6)
         s.recv(12)
         s.sendall(b"RFB 003.008\n")
         n = recvn(s, 1)[0]

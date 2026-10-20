@@ -106,37 +106,6 @@ jobs:
               print("  |"+"".join(chars[min(9,v*10//256)] for v in d[y*cols:(y+1)*cols])+"|")
           PYEOF
 
-      - name: Levantar noVNC nativo (VNC real) en paralelo + sonda
-        run: |
-          KS=/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart
-          sudo "$KS" -activate -configure -access -on -users runner -privs -all \
-            -clientopts -setvnclegacy -vnclegacy yes -setvncpw -vncpw macos26 \
-            -restart -agent 2>&1 | tail -4
-          sleep 6
-          mkdir -p /tmp/novnc
-          curl -fsSL --retry 3 -o /tmp/novnc.tar.gz https://github.com/novnc/noVNC/archive/refs/tags/v1.5.0.tar.gz
-          tar -xzf /tmp/novnc.tar.gz -C /tmp/novnc --strip-components=1
-          python3 - <<'PYEOF'
-          p = '/tmp/novnc/core/rfb.js'
-          s = open(p, encoding='utf-8').read()
-          old = "const types = this._sock.rQshiftBytes(numTypes);"
-          new = old + "\n            types.sort((a, b) => (a === 2 ? -1 : (b === 2 ? 1 : 0)));"
-          if old in s and 'a === 2 ? -1' not in s:
-              open(p, 'w', encoding='utf-8').write(s.replace(old, new, 1))
-              print("PATCH OK")
-          PYEOF
-          python3 -m venv /tmp/vncenv >/dev/null 2>&1 || true
-          /tmp/vncenv/bin/pip install -q websockify 2>&1 | tail -1 || true
-          WS=$(/tmp/vncenv/bin/python -c "import websockify,os;print(os.path.dirname(websockify.__file__))" 2>/dev/null || echo "")
-          echo "websockify: $WS"
-          if [ -n "$WS" ]; then
-            nohup /tmp/vncenv/bin/python "$WS/websocketproxy.py" --web /tmp/novnc 6080 localhost:5900 >/tmp/websockify.log 2>&1 &
-            sleep 4
-            cat /tmp/websockify.log
-          fi
-          echo "=== SONDA: contenido del framebuffer VNC (varias passwords) ==="
-          python3 tools/vncprobe.py macos26 "macos26 " "" runner password tahoe macos admin vnc 12345678 87654321 123456 2>&1 | tail -60 || true
-
       - name: Levantar escritorio web + tunel
         run: |
           echo "=== venv con pyobjc (CoreGraphics nativo) ==="
@@ -209,6 +178,37 @@ jobs:
             cat /tmp/push2.log
           }
           cat /tmp/push.log
+
+      - name: Levantar noVNC nativo (VNC real) en paralelo + sonda
+        run: |
+          KS=/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart
+          sudo "$KS" -activate -configure -access -on -users runner -privs -all \
+            -clientopts -setvnclegacy -vnclegacy yes -setvncpw -vncpw macos26 \
+            -restart -agent 2>&1 | tail -4
+          sleep 6
+          mkdir -p /tmp/novnc
+          curl -fsSL --retry 3 -o /tmp/novnc.tar.gz https://github.com/novnc/noVNC/archive/refs/tags/v1.5.0.tar.gz
+          tar -xzf /tmp/novnc.tar.gz -C /tmp/novnc --strip-components=1
+          python3 - <<'PYEOF'
+          p = '/tmp/novnc/core/rfb.js'
+          s = open(p, encoding='utf-8').read()
+          old = "const types = this._sock.rQshiftBytes(numTypes);"
+          new = old + "\n            types.sort((a, b) => (a === 2 ? -1 : (b === 2 ? 1 : 0)));"
+          if old in s and 'a === 2 ? -1' not in s:
+              open(p, 'w', encoding='utf-8').write(s.replace(old, new, 1))
+              print("PATCH OK")
+          PYEOF
+          python3 -m venv /tmp/vncenv >/dev/null 2>&1 || true
+          /tmp/vncenv/bin/pip install -q websockify 2>&1 | tail -1 || true
+          WS=$(/tmp/vncenv/bin/python -c "import websockify,os;print(os.path.dirname(websockify.__file__))" 2>/dev/null || echo "")
+          echo "websockify: $WS"
+          if [ -n "$WS" ]; then
+            nohup /tmp/vncenv/bin/python "$WS/websocketproxy.py" --web /tmp/novnc 6080 localhost:5900 >/tmp/websockify.log 2>&1 &
+            sleep 4
+            cat /tmp/websockify.log
+          fi
+          echo "=== SONDA: contenido del framebuffer VNC (varias passwords) ==="
+          timeout 90 python3 tools/vncprobe.py macos26 "macos26 " "" runner 2>&1 | tail -40 || true
 
       - name: Mantener vivo
         run: |
