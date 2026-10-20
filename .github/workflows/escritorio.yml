@@ -53,6 +53,55 @@ jobs:
           ls -la /tmp/t.jpg 2>&1 || echo "sin captura"
           /bin/bash -c "/usr/bin/sips -g pixelWidth -g pixelHeight /tmp/t.jpg" 2>&1 | tail -3
 
+      - name: Preparar el escritorio (wallpaper visible + ventanas)
+        run: |
+          echo "=== wallpapers disponibles ==="
+          ls /System/Library/Desktop\ Pictures/ 2>&1 | head -12
+          echo "=== poner wallpaper visible ==="
+          for p in "/System/Library/Desktop Pictures/Sonoma Graphite.heic" \
+                   "/System/Library/Desktop Pictures/Basic.heic" \
+                   "/System/Library/Desktop Pictures/Default.heic" \
+                   "/Library/Desktop Pictures/Sonoma Graphite.heic" \
+                   "/System/Library/Desktop Pictures/Abstract.heic"; do
+            [ -f "$p" ] || continue
+            if /bin/bash -c "osascript -e 'tell application \"Finder\" to set desktop picture to POSIX file \"$p\"'" >/dev/null 2>&1; then
+              echo "wallpaper puesto: $p"; break
+            fi
+          done
+          echo
+          echo "=== abrir Terminal con contenido ==="
+          /bin/bash -c 'osascript -e "tell application \"Terminal\" to do script \"sw_vers; uname -a; echo ESCORITORIO-ACTIVO\"" -e "tell application \"Terminal\" to activate"' 2>&1 | head -3 || true
+          sleep 5
+          /bin/bash -c 'open -a "TextEdit"' 2>&1 | head -2 || true
+          sleep 4
+          echo "=== apps abiertas ==="
+          ps ax -o command | grep -iE "Terminal.app|TextEdit|Safari" | grep -v grep | head -5 || echo "ninguna"
+          echo
+          echo "=== verificacion: contenido en el CENTRO de la pantalla ==="
+          /bin/bash -c "/usr/sbin/screencapture -x -t jpg /tmp/check.jpg" 2>&1 || true
+          ls -la /tmp/check.jpg 2>&1 || echo "sin captura"
+          python3 -m venv /tmp/vp >/dev/null 2>&1 || true
+          /tmp/vp/bin/pip install -q pillow 2>&1 | tail -1 || true
+          /tmp/vp/bin/python - <<'PYEOF' 2>&1 || true
+          from PIL import Image
+          im = Image.open('/tmp/check.jpg').convert('L')
+          W,H = im.size
+          px = im.load()
+          def band(y0,y1,label):
+              vals=[px[x,y] for y in range(y0,min(y1,H),2) for x in range(0,W,4)]
+              print(f"  {label:26} media={sum(vals)/len(vals):6.1f}  no_nulos={100*sum(1 for v in vals if v)/len(vals):5.1f}%")
+          band(0,28,"menu")
+          band(28,120,"borde")
+          band(120,600,"CENTRO (wallpaper)")
+          band(600,700,"inferior")
+          band(700,768,"dock")
+          cols,rows=80,40
+          small=im.resize((cols,rows)); chars=" .:-=+*#%@"; d=list(small.getdata())
+          print("  --- ASCII ---")
+          for y in range(rows):
+              print("  |"+"".join(chars[min(9,v*10//256)] for v in d[y*cols:(y+1)*cols])+"|")
+          PYEOF
+
       - name: Levantar escritorio web + tunel
         run: |
           nohup /bin/bash -c "python3 tools/webdesktop.py" >/tmp/webdesktop.log 2>&1 &

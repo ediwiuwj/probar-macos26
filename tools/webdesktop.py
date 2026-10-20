@@ -138,15 +138,17 @@ HTML = """<!doctype html>
   html,body{margin:0;background:#0b0b0f;color:#ddd;font:13px system-ui;
             display:flex;flex-direction:column;align-items:center;
             justify-content:center;height:100vh;overflow:hidden}
-  #wrap{position:relative;box-shadow:0 0 40px #000;border:1px solid #222}
-  img{display:block;image-rendering:auto;user-select:none}
+  #wrap{position:relative;display:inline-block;box-shadow:0 0 40px #000;
+        border:1px solid #333;background:#000}
+  img{display:block;max-width:96vw;max-height:86vh;width:auto;height:auto;
+      image-rendering:auto;user-select:none;cursor:crosshair}
   #hud{position:absolute;top:6px;left:8px;background:#000a;padding:4px 8px;
-       border-radius:6px;font-size:11px;pointer-events:none}
-  #bar{position:fixed;bottom:8px;left:8px;background:#000a;padding:5px 10px;
+       border-radius:6px;font-size:11px;pointer-events:none;color:#0f0}
+  #bar{position:fixed;bottom:8px;left:8px;background:#000c;padding:5px 10px;
        border-radius:6px;font-size:11px}
 </style></head><body>
-<div id="wrap"><img id="s" src="/screen.jpg?t=0"><div id="hud">macOS 26 - cargando...</div></div>
-<div id="bar">raton: clic / arrastrar &nbsp;|&nbsp; teclado: escribe en la pagina &nbsp;|&nbsp; ~1s de latencia</div>
+<div id="wrap"><img id="s" src="/screen.jpg?t=0"><div id="hud">macOS 26</div></div>
+<div id="bar">raton: clic / arrastrar &nbsp;|&nbsp; teclado: escribe en la pagina &nbsp;|&nbsp; ~0.4s de latencia</div>
 <script>
 const img=document.getElementById('s'), hud=document.getElementById('hud');
 let W=1024,H=768,lastMove=0;
@@ -156,7 +158,7 @@ function pos(e){const r=img.getBoundingClientRect();
           y:Math.max(0,Math.min(H-1,Math.round((e.clientY-r.top)/r.height*H)))};}
 function send(ev){fetch('/event',{method:'POST',headers:{'Content-Type':'application/json'},
   body:JSON.stringify(ev)}).catch(()=>{});}
-img.addEventListener('mousemove',e=>{const now=Date.now();if(now-lastMove<90)return;
+img.addEventListener('mousemove',e=>{const now=Date.now();if(now-lastMove<80)return;
   lastMove=now;send({kind:'move',...pos(e)});});
 img.addEventListener('mousedown',e=>{e.preventDefault();send({kind:'down',...pos(e)});});
 window.addEventListener('mouseup',e=>{send({kind:'up',...pos(e)});});
@@ -169,7 +171,7 @@ window.addEventListener('keydown',e=>{
 });
 function poll(){img.src='/screen.jpg?t='+Date.now();
   hud.textContent='macOS 26 - '+new Date().toLocaleTimeString();}
-setInterval(poll,700);
+setInterval(poll,400);
 </script></body></html>"""
 
 
