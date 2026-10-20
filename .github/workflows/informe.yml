@@ -1,0 +1,78 @@
+name: Informe pantalla macOS 26
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  informe:
+    runs-on: macos-26
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Recopilar datos
+        run: |
+          mkdir -p /tmp/rep
+          R=/tmp/rep/REPORT.txt
+          exec > "$R" 2>&1
+          echo "################ SESION ################"
+          echo "--- who ---"; who || true
+          echo "--- ps: loginwindow / WindowServer / Dock / Finder ---"
+          ps ax -o pid,user,command | grep -iE "loginwindow|WindowServer|/Dock|Finder|arkad|anka" | grep -v grep || echo "ninguno"
+          echo
+          echo "--- sesion GUI del usuario 501? ---"
+          launchctl print gui/$(id -u) 2>&1 | head -5 || echo "sin sesion gui"
+          echo
+          echo "--- autoLoginUser ---"
+          sudo defaults read /Library/Preferences/com.apple.loginwindow autoLoginUser 2>&1 || true
+          echo "--- autoLoginUserScreenLocked ---"
+          sudo defaults read /Library/Preferences/com.apple.loginwindow autoLoginUserScreenLocked 2>&1 || true
+          echo
+          echo "--- pantallas / display ---"
+          system_profiler SPDisplaysDataType 2>&1 | head -30
+          echo
+          echo "--- pantalla: resolucion del framebuffer virtual ---"
+          ioreg -lw0 -r -c AppleVCSDisplay 2>/dev/null | head -5 || true
+          echo
+          echo "################ CAPTURA DE CONSOLA ################"
+          screencapture -x /tmp/shot.png 2>&1 || true
+          ls -la /tmp/shot.png 2>/dev/null || echo "sin captura"
+          python3 -m venv /tmp/venv2 2>/dev/null || true
+          /tmp/venv2/bin/pip install -q pillow 2>&1 | tail -2 || true
+          /tmp/venv2/bin/python - <<'PYEOF' 2>&1 || true
+          from PIL import Image
+          im = Image.open('/tmp/shot.png').convert('L')
+          print("resolucion captura:", im.size)
+          cols = 60
+          rows = 30
+          small = im.resize((cols, rows))
+          chars = " .:-=+*#%@"
+          px = list(small.getdata())
+          print("--- render ASCII de la CONSOLA ---")
+          for y in range(rows):
+              print("|" + "".join(chars[min(9, v*10//256)] for v in px[y*cols:(y+1)*cols]) + "|")
+          vals = list(im.getdata())
+          nz = sum(1 for v in vals if v)
+          print(f"pixeles no nulos: {nz}/{len(vals)} ({100.0*nz/len(vals):.2f}%)")
+          print("colores unicos (aprox):", len(set(vals)))
+          PYEOF
+          echo
+          echo "################ FRAMEBUFFER VNC ################"
+          python3 tools/vncprobe.py macos26 2>&1 || true
+          echo
+          echo "################ RESUMEN ################"
+          echo "fin"
+
+      - name: Publicar informe
+        run: |
+          cp /tmp/rep/REPORT.txt ./REPORT.txt
+          wc -l REPORT.txt
+          git checkout -B main origin/main 2>/dev/null || git checkout -B main
+          git config user.email "bot@users.noreply.github.com"
+          git config user.name "bot"
+          git add -f REPORT.txt
+          git commit -q -m "REPORT" || true
+          git push "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" main 2>&1 | tail -2 || true

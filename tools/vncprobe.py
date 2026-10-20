@@ -114,6 +114,7 @@ def probe(pw, host="127.0.0.1", port=5900):
         print(f"  mensaje framebuffer={t}  rectangulos={nrects}")
         nonzero = 0
         total = 0
+        canvas = bytearray(w * h)
         for _ in range(nrects):
             rx, ry, rw, rh, enc = struct.unpack(">HHHHi", recvn(s, 12))
             if enc != 0:
@@ -121,10 +122,26 @@ def probe(pw, host="127.0.0.1", port=5900):
             data = recvn(s, rw * rh * 4)
             total += len(data)
             nonzero += sum(1 for b in data if b)
+            # pixel format pedido: 32bpp little-endian, rojo en byte 1
+            for i in range(rw * rh):
+                r = data[i * 4 + 1]
+                g = data[i * 4 + 2]
+                b = data[i * 4 + 3]
+                px = rx + (i % rw)
+                py = ry + (i // rw)
+                if 0 <= px < w and 0 <= py < h:
+                    canvas[py * w + px] = (r * 299 + g * 587 + b * 114) // 1000
         if total == 0:
             return 3, "no se recibieron pixeles"
         pct = 100.0 * nonzero / total
         print(f"  bytes no nulos: {nonzero}/{total} ({pct:.2f}%)")
+        print("  --- render ASCII del framebuffer VNC ---")
+        for y in range(0, h, max(1, h // 30)):
+            row = []
+            for x in range(0, w, max(1, w // 60)):
+                v = canvas[y * w + x]
+                row.append(" .:-=+*#%@"[min(9, v * 10 // 256)])
+            print("  |" + "".join(row) + "|")
         if nonzero == 0:
             return 1, "PANTALLA NEGRA (todos los pixeles a 0)"
         return 0, f"PANTALLA CON CONTENIDO ({pct:.2f}% de bytes no nulos)"
