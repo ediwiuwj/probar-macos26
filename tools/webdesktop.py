@@ -327,10 +327,16 @@ def handle_event(ev):
     y = int(round(y_img * sh / ih))
     if kind == "move":
         cliclick(f"m:{x},{y}")
-    elif kind == "down":
+    elif kind == "down":          # boton izquierdo: inicio de arrastre
         cliclick(f"dd:{x},{y}")
-    elif kind == "up":
+    elif kind == "up":            # boton izquierdo: fin de arrastre
         cliclick(f"du:{x},{y}")
+    elif kind == "right":         # boton derecho
+        cliclick(f"rc:{x},{y}")
+    elif kind == "middle":
+        cliclick(f"mc:{x},{y}")
+    elif kind == "dblclick":
+        cliclick(f"dc:{x},{y}")
     elif kind == "key":
         k = ev.get("key", "space")
         cliclick("kp:" + KEYMAP.get(k, k))
@@ -339,9 +345,12 @@ def handle_event(ev):
         if t:
             cliclick("t:" + t)
     elif kind == "scroll":
-        d = int(ev.get("dy", 0))
-        if d:
-            cliclick("wd:" if d < 0 else "wu:")
+        # deltaY > 0 en el navegador = el usuario hace scroll hacia ABAJO,
+        # que en macOS es rueda hacia abajo (wd).
+        dy = float(ev.get("dy", 0))
+        n = int(ev.get("n", 1)) or 1
+        if dy:
+            cliclick(("wd:" if dy > 0 else "wu:") + str(n))
 
 
 HTML = """<!doctype html>
@@ -390,10 +399,18 @@ function send(ev){fetch('/event',{method:'POST',headers:{'Content-Type':'applica
 img.addEventListener('mousemove',e=>{const now=Date.now();if(now-lastMove<50)return;
   lastMove=now;send({kind:'move',...pos(e)});});
 img.addEventListener('mousedown',e=>{e.preventDefault();mark(e);
-  send({kind:'down',...pos(e)});});
-window.addEventListener('mouseup',e=>{send({kind:'up',...pos(e)});});
+  const p=pos(e);
+  if(e.button===2)      send({kind:'right',...p});
+  else if(e.button===1) send({kind:'middle',...p});
+  else                  send({kind:'down',...p});});
+window.addEventListener('mouseup',e=>{
+  if(e.button===0) send({kind:'up',...pos(e)});});
+img.addEventListener('dblclick',e=>{e.preventDefault();
+  send({kind:'dblclick',...pos(e)});});
 img.addEventListener('contextmenu',e=>e.preventDefault());
-img.addEventListener('wheel',e=>{e.preventDefault();send({kind:'scroll',dy:e.deltaY});});
+img.addEventListener('wheel',e=>{e.preventDefault();
+  const dy=e.deltaY, n=Math.max(1,Math.min(10,Math.round(Math.abs(dy)/100)||1));
+  send({kind:'scroll',dy:dy,n:n,...pos(e)});});
 window.addEventListener('keydown',e=>{
   if(e.key.length===1){send({kind:'text',text:e.key});}
   else{send({kind:'key',key:e.key});}

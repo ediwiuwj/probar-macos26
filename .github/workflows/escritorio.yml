@@ -31,6 +31,16 @@ jobs:
           which cliclick || ls -la /opt/homebrew/bin/cliclick 2>&1 || echo "cliclick NO disponible"
           echo "--- probando cliclick ---"
           /bin/bash -c "cliclick p" 2>&1 | head -3 || true
+          echo "--- comandos soportados (test real) ---"
+          for c in "c:100,100" "rc:100,100" "mc:100,100" "dc:100,100" \
+                   "dd:100,100" "du:100,100" "m:100,100" "wd:2" "wu:2" \
+                   "t:prueba" "kp:space" "kc:esc"; do
+            if /bin/bash -c "cliclick $c" >/dev/null 2>&1; then
+              echo "  $c -> OK"
+            else
+              echo "  $c -> FALLO"
+            fi
+          done
 
       - name: Permisos TCC para capture/accesibilidad
         run: |
