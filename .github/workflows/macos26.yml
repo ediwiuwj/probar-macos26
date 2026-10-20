@@ -1,0 +1,52 @@
+name: Probar macOS 26
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  macos26:
+    name: macOS 26 (${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-26       # Apple Silicon (arm64) - gratis y rápido
+            arch: arm64
+          - os: macos-26-intel # Intel x86_64 (10x coste si el repo fuera privado)
+            arch: intel
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Sistema
+        run: |
+          echo "================ SISTEMA ================"
+          sw_vers
+          echo
+          echo "uname: $(uname -a)"
+          echo "hw.model: $(sysctl -n hw.model)"
+          echo "hw.memsize: $(($(sysctl -n hw.memsize)/1024/1024/1024)) GB"
+          echo "hw.ncpu: $(sysctl -n hw.ncpu)"
+          echo "hw.optional.arm64: $(sysctl -n hw.optional.arm64 2>/dev/null || echo n/a)"
+          echo
+          echo "================ HARDWARE ================"
+          system_profiler SPHardwareDataType
+          echo
+          echo "================ GPU / DISPLAY ================"
+          system_profiler SPDisplaysDataType
+
+      - name: Xcode / SDK / Swift
+        run: |
+          echo "================ XCODE ================"
+          xcodebuild -version || true
+          echo "Xcode path: $(xcode-select -p)"
+          echo "macOS SDK: $(xcrun --sdk macosx --show-sdk-version 2>/dev/null || echo n/a)"
+          echo
+          echo "================ SWIFT ================"
+          swift --version
+
+      - name: Metal (GPU)
+        run: swift metal_test.swift
