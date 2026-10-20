@@ -2,8 +2,6 @@ name: Probar macOS 26
 
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
 
 jobs:
   macos26:
