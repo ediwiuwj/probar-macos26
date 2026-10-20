@@ -132,7 +132,7 @@ jobs:
           done
           sudo launchctl kickstart -k system/com.apple.tccd 2>/dev/null || true
           sleep 3
-          nohup /bin/bash -c "FPS=30 /tmp/wd/bin/python tools/webdesktop.py" >/tmp/webdesktop.log 2>&1 &
+          nohup /bin/bash -c "FPS=30 QUALITY=0.35 /tmp/wd/bin/python tools/webdesktop.py" >/tmp/webdesktop.log 2>&1 &
           sleep 18
           echo "--- log webdesktop ---"; cat /tmp/webdesktop.log
           echo "--- test local ---"

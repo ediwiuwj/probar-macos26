@@ -94,19 +94,44 @@ def capture_quartz():
     interval = 1.0 / FPS
     frames = 0
     t0 = time.time()
+    mem_ok = True
+    try:
+        from Foundation import NSMutableData
+        from Quartz import CGImageDestinationCreateWithData
+    except Exception:
+        mem_ok = False
     while True:
         t = time.time()
         try:
             img = CGDisplayCreateImage(did)
             if img is not None:
-                dest = CGImageDestinationCreateWithURL(url, "public.jpeg", 1, None)
-                if dest is not None:
-                    CGImageDestinationAddImage(
-                        dest, img,
-                        {kCGImageDestinationLossyCompressionQuality: QUALITY})
-                    CGImageDestinationFinalize(dest)
-                    with open(SHOT, "rb") as f:
-                        _publish(f.read())
+                data = None
+                if mem_ok:
+                    try:
+                        buf = NSMutableData.data()
+                        dest = CGImageDestinationCreateWithData(
+                            buf, "public.jpeg", 1, None)
+                        if dest is not None:
+                            CGImageDestinationAddImage(
+                                dest, img,
+                                {kCGImageDestinationLossyCompressionQuality: QUALITY})
+                            if CGImageDestinationFinalize(dest):
+                                data = bytes(buf)
+                    except Exception:
+                        mem_ok = False
+                        data = None
+                if data is None:
+                    dest = CGImageDestinationCreateWithURL(
+                        url, "public.jpeg", 1, None)
+                    if dest is not None:
+                        CGImageDestinationAddImage(
+                            dest, img,
+                            {kCGImageDestinationLossyCompressionQuality: QUALITY})
+                        CGImageDestinationFinalize(dest)
+                        with open(SHOT, "rb") as f:
+                            data = f.read()
+                if data:
+                    _publish(data)
                     frames += 1
                     el = time.time() - t0
                     if el > 1:
