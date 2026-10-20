@@ -139,17 +139,36 @@ jobs:
 
       - name: Levantar escritorio web + tunel
         run: |
-          nohup /bin/bash -c "FPS=6 python3 tools/webdesktop.py" >/tmp/webdesktop.log 2>&1 &
-          sleep 12
+          echo "=== venv con pyobjc (CoreGraphics nativo) ==="
+          python3 -m venv /tmp/wd
+          /tmp/wd/bin/pip install -q --upgrade pip 2>&1 | tail -1
+          /tmp/wd/bin/pip install -q pyobjc-framework-Quartz 2>&1 | tail -3
+          /tmp/wd/bin/python -c "import Quartz; print('pyobjc Quartz OK')" 2>&1 | tail -2
+          echo "=== TCC para el python del venv ==="
+          DB="/Library/Application Support/com.apple.TCC/TCC.db"
+          for c in /tmp/wd/bin/python /tmp/wd/bin/python3; do
+            [ -e "$c" ] || continue
+            for svc in kTCCServiceScreenCapture kTCCServiceAccessibility; do
+              sudo sqlite3 "$DB" "INSERT OR IGNORE INTO access (service, client, client_type, auth_value, auth_reason, indirect_object_identifier, indirect_object_identifier_type, flags, last_modified) SELECT '$svc', '$c', client_type, auth_value, auth_reason, indirect_object_identifier, indirect_object_identifier_type, flags, strftime('%s','now') FROM access WHERE service='$svc' AND client IN ('/bin/bash','/opt/hca/hosted-compute-agent') LIMIT 1;" 2>&1
+              sudo sqlite3 "$DB" "INSERT OR IGNORE INTO access (service, client, client_type, auth_value, auth_reason, indirect_object_identifier, indirect_object_identifier_type, flags, last_modified) SELECT '$svc', '$c', 1, 2, 4, NULL, NULL, 0, strftime('%s','now') WHERE NOT EXISTS (SELECT 1 FROM access WHERE service='$svc' AND client='$c');" 2>&1
+            done
+          done
+          sudo launchctl kickstart -k system/com.apple.tccd 2>/dev/null || true
+          sleep 3
+          nohup /bin/bash -c "FPS=30 /tmp/wd/bin/python tools/webdesktop.py" >/tmp/webdesktop.log 2>&1 &
+          sleep 18
           echo "--- log webdesktop ---"; cat /tmp/webdesktop.log
           echo "--- test local ---"
           curl -s -o /dev/null -w "info -> HTTP %{http_code}\n" --max-time 10 http://127.0.0.1:6081/info || true
           curl -s --max-time 10 http://127.0.0.1:6081/info || true
           echo
-          echo "--- test stream MJPEG (5s) ---"
-          curl -s --max-time 5 -o /tmp/stream.bin -w "stream -> HTTP %{http_code} %{size_download} bytes\n" http://127.0.0.1:6081/stream.mjpeg || true
-          head -c 120 /tmp/stream.bin | cat -v | head -3
+          echo "--- fps real medido tras 10s ---"
+          sleep 10
+          curl -s --max-time 10 http://127.0.0.1:6081/info || true
           echo
+          echo "--- test stream MJPEG (6s) ---"
+          curl -s --max-time 6 -o /tmp/stream.bin -w "stream -> HTTP %{http_code} %{size_download} bytes\n" http://127.0.0.1:6081/stream.mjpeg || true
+          grep -ac "Content-Type: image/jpeg" /tmp/stream.bin 2>/dev/null | head -1 | sed 's/^/frames en 6s: /'
           if [ ! -x /tmp/cloudflared ]; then
             curl -fsSL --retry 3 -o /tmp/cloudflared.tgz https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-arm64.tgz
             tar -xzf /tmp/cloudflared.tgz -C /tmp cloudflared

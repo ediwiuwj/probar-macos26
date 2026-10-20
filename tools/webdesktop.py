@@ -2,15 +2,17 @@
 """
 Escritorio web para macOS 26 en un runner de GitHub Actions.
 
-- VISTA: streaming MJPEG nativo (multipart/x-mixed-replace). El navegador
-  reproduce el flujo directamente, sin polling: latencia ~= intervalo de captura.
-- CONTROL: POST /event con inyeccion de raton/teclado via cliclick.
+VISTA   : streaming MJPEG nativo (multipart/x-mixed-replace). El navegador
+          reproduce el flujo solo, sin polling.
+CAPTURA : CoreGraphics (CGDisplayCreateImage) en bucle cerrado -> ~30 fps.
+          Si pyobjc no esta disponible, cae a 'screencapture' por proceso.
+CONTROL : POST /event con inyeccion de raton/teclado via cliclick.
 
 Endpoints:
   GET  /              -> HTML
-  GET  /stream.mjpeg  -> stream de frames (multipart)
+  GET  /stream.mjpeg  -> stream de frames
   GET  /screen.jpg    -> frame actual (debug)
-  GET  /info          -> {width,height}
+  GET  /info          -> {width,height,fps,backend}
   POST /event         -> {kind: move|down|up|key|text|scroll, ...}
 """
 import http.server
@@ -23,10 +25,11 @@ import threading
 import time
 
 SHOT = "/tmp/webdesktop.jpg"
-STATE = {"data": b"", "mtime": 0.0, "seq": 0}
+STATE = {"data": b"", "mtime": 0.0, "seq": 0, "fps": 0.0, "backend": "?"}
 LOCK = threading.Lock()
 SCREEN = {"w": 1024, "h": 768}
-FPS = float(os.environ.get("FPS", "5"))
+FPS = float(os.environ.get("FPS", "30"))
+QUALITY = float(os.environ.get("QUALITY", "0.45"))
 
 KEYMAP = {
     "Enter": "return", "Backspace": "delete", "Tab": "tab", "Escape": "esc",
@@ -36,6 +39,19 @@ KEYMAP = {
     "Delete": "delete", "Meta": "command", "Control": "ctrl", "Alt": "alt",
     "Shift": "shift",
 }
+
+try:
+    from Quartz import (
+        CGMainDisplayID, CGDisplayCreateImage, CGDisplayPixelsWide,
+        CGDisplayPixelsHigh, CGImageDestinationCreateWithURL,
+        CGImageDestinationAddImage, CGImageDestinationFinalize,
+        CFURLCreateFromFileSystemRepresentation,
+        kCGImageDestinationLossyCompressionQuality,
+    )
+    QUARTZ = True
+except Exception as _e:  # pragma: no cover
+    QUARTZ = False
+    _QUARTZ_ERR = str(_e)
 
 
 def find_cliclick():
@@ -61,33 +77,64 @@ def run_via_bash(cmd, timeout=15):
         return None
 
 
-def detect_size():
-    r = run_via_bash("/usr/bin/sips -g pixelWidth -g pixelHeight " + SHOT)
-    if r and r.returncode == 0:
-        vals = {}
-        for line in r.stdout.decode("utf-8", "replace").splitlines():
-            if "pixelWidth" in line:
-                vals["w"] = int(line.split(":")[-1].strip())
-            if "pixelHeight" in line:
-                vals["h"] = int(line.split(":")[-1].strip())
-        if "w" in vals and "h" in vals:
-            SCREEN["w"], SCREEN["h"] = vals["w"], vals["h"]
+def _publish(data):
+    with LOCK:
+        STATE["data"] = data
+        STATE["mtime"] = time.time()
+        STATE["seq"] += 1
 
 
-def capture_loop():
+def capture_quartz():
+    """Captura nativa de CoreGraphics + JPEG con ImageIO (sin procesos)."""
+    did = CGMainDisplayID()
+    SCREEN["w"] = CGDisplayPixelsWide(did) or 1024
+    SCREEN["h"] = CGDisplayPixelsHigh(did) or 768
+    path = SHOT.encode()
+    url = CFURLCreateFromFileSystemRepresentation(None, path, len(path), False)
+    interval = 1.0 / FPS
+    frames = 0
+    t0 = time.time()
+    while True:
+        t = time.time()
+        try:
+            img = CGDisplayCreateImage(did)
+            if img is not None:
+                dest = CGImageDestinationCreateWithURL(url, "public.jpeg", 1, None)
+                if dest is not None:
+                    CGImageDestinationAddImage(
+                        dest, img,
+                        {kCGImageDestinationLossyCompressionQuality: QUALITY})
+                    CGImageDestinationFinalize(dest)
+                    with open(SHOT, "rb") as f:
+                        _publish(f.read())
+                    frames += 1
+                    el = time.time() - t0
+                    if el > 1:
+                        with LOCK:
+                            STATE["fps"] = frames / el
+                        frames = 0
+                        t0 = time.time()
+        except Exception as e:
+            with LOCK:
+                STATE["backend"] = "quartz-error: " + str(e)[:80]
+            time.sleep(1)
+            continue
+        dt = time.time() - t
+        if dt < interval:
+            time.sleep(interval - dt)
+
+
+def capture_subprocess():
+    """Fallback: screencapture por proceso."""
+    interval = 1.0 / max(1, FPS // 4)
     while True:
         run_via_bash("/usr/sbin/screencapture -x -t jpg " + SHOT, timeout=20)
         try:
             with open(SHOT, "rb") as f:
-                data = f.read()
-            if data:
-                with LOCK:
-                    STATE["data"] = data
-                    STATE["mtime"] = time.time()
-                    STATE["seq"] += 1
+                _publish(f.read())
         except Exception:
             pass
-        time.sleep(1.0 / FPS)
+        time.sleep(interval)
 
 
 def cliclick(*args):
@@ -126,32 +173,34 @@ HTML = """<!doctype html>
 <style>
   html,body{margin:0;height:100%;background:#08080c;color:#ddd;
             font:13px system-ui;overflow:hidden}
-  #stage{position:absolute;inset:6px;display:flex;align-items:center;
+  #stage{position:absolute;inset:4px;display:flex;align-items:center;
          justify-content:center}
-  #wrap{position:relative;width:100%;height:100%;display:flex;
-        align-items:center;justify-content:center}
   img{max-width:100%;max-height:100%;width:auto;height:auto;
-      object-fit:contain;image-rendering:auto;user-select:none;cursor:crosshair;
-      border:1px solid #2b2b33;box-shadow:0 0 30px #000}
+      object-fit:contain;image-rendering:auto;user-select:none;
+      cursor:crosshair;border:1px solid #2b2b33;box-shadow:0 0 30px #000}
   #hud{position:fixed;top:8px;left:10px;background:#000b;padding:4px 9px;
        border-radius:6px;font-size:11px;pointer-events:none}
   #bar{position:fixed;bottom:8px;left:10px;background:#000b;padding:5px 11px;
        border-radius:6px;font-size:11px}
 </style></head><body>
-<div id="stage"><div id="wrap"><img id="s" src="/stream.mjpeg"></div></div>
+<div id="stage"><img id="s" src="/stream.mjpeg"></div>
 <div id="hud">macOS 26</div>
-<div id="bar">raton: clic / arrastrar &nbsp;|&nbsp; teclado: escribe en la pagina &nbsp;|&nbsp; stream MJPEG</div>
+<div id="bar">raton: clic / arrastrar &nbsp;|&nbsp; teclado: escribe en la pagina &nbsp;|&nbsp; <span id="fps">-</span> fps</div>
 <script>
 const img=document.getElementById('s'), hud=document.getElementById('hud');
 let W=1024,H=768,lastMove=0;
-fetch('/info').then(r=>r.json()).then(j=>{W=j.width;H=j.height;});
+function refreshInfo(){fetch('/info').then(r=>r.json()).then(j=>{
+  W=j.width;H=j.height;
+  document.getElementById('fps').textContent=j.fps.toFixed(1);
+});}
+refreshInfo(); setInterval(refreshInfo,1000);
 function pos(e){const r=img.getBoundingClientRect();
   if(!r.width||!r.height) return {x:0,y:0};
   return {x:Math.max(0,Math.min(W-1,Math.round((e.clientX-r.left)/r.width*W))),
           y:Math.max(0,Math.min(H-1,Math.round((e.clientY-r.top)/r.height*H)))};}
 function send(ev){fetch('/event',{method:'POST',headers:{'Content-Type':'application/json'},
   body:JSON.stringify(ev)}).catch(()=>{});}
-img.addEventListener('mousemove',e=>{const now=Date.now();if(now-lastMove<60)return;
+img.addEventListener('mousemove',e=>{const now=Date.now();if(now-lastMove<50)return;
   lastMove=now;send({kind:'move',...pos(e)});});
 img.addEventListener('mousedown',e=>{e.preventDefault();send({kind:'down',...pos(e)});});
 window.addEventListener('mouseup',e=>{send({kind:'up',...pos(e)});});
@@ -203,7 +252,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     self.wfile.write(data)
                     self.wfile.write(b"\r\n")
                     self.wfile.flush()
-                time.sleep(0.03)
+                time.sleep(0.005)
         except Exception:
             pass
 
@@ -221,7 +270,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             else:
                 self._send(200, data, "image/jpeg")
         elif path == "/info":
-            self._send(200, json.dumps({"width": SCREEN["w"], "height": SCREEN["h"]}),
+            with LOCK:
+                fps = STATE["fps"]
+                backend = STATE["backend"]
+            self._send(200, json.dumps({"width": SCREEN["w"], "height": SCREEN["h"],
+                                        "fps": round(fps, 1), "backend": backend}),
                        "application/json")
         else:
             self._send(404, b"no", "text/plain")
@@ -250,9 +303,15 @@ class Server(socketserver.ThreadingTCPServer):
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "6081"))
-    threading.Thread(target=capture_loop, daemon=True).start()
-    time.sleep(3)
-    detect_size()
-    print(f"webdesktop: {SCREEN['w']}x{SCREEN['h']} fps={FPS} cliclick={CLICLICK}",
-          flush=True)
+    if QUARTZ:
+        with LOCK:
+            STATE["backend"] = "coregraphics"
+        threading.Thread(target=capture_quartz, daemon=True).start()
+    else:
+        with LOCK:
+            STATE["backend"] = "screencapture (sin pyobjc: " + _QUARTZ_ERR[:60] + ")"
+        threading.Thread(target=capture_subprocess, daemon=True).start()
+    time.sleep(4)
+    print(f"webdesktop: {SCREEN['w']}x{SCREEN['h']} target={FPS}fps "
+          f"backend={STATE['backend']} cliclick={CLICLICK}", flush=True)
     Server(("127.0.0.1", port), Handler).serve_forever()
