@@ -73,14 +73,22 @@ jobs:
             fi
           done
           echo
-          echo "=== abrir Terminal con contenido ==="
-          /bin/bash -c 'osascript -e "tell application \"Terminal\" to do script \"sw_vers; uname -a; echo ESCORITORIO-ACTIVO\"" -e "tell application \"Terminal\" to activate"' 2>&1 | head -3 || true
-          sleep 5
-          /bin/bash -c 'osascript -e "tell application \"Terminal\" to set bounds of front window to {40, 60, 900, 620}"' 2>&1 | head -2 || true
-          /bin/bash -c 'open -a "TextEdit"' 2>&1 | head -2 || true
+          echo "=== cerrar Ajustes (se abrio en pantalla completa y tapaba el Dock) ==="
+          /bin/bash -c 'osascript -e "tell application \"System Settings\" to quit"' 2>&1 | head -2 || true
+          /bin/bash -c 'pkill -f "System Settings"' 2>&1 | head -2 || true
+          sleep 3
+          echo "=== Dock siempre visible (no auto-oculto) ==="
+          /bin/bash -c 'defaults write com.apple.dock autohide -bool false' 2>&1 || true
+          /bin/bash -c 'defaults write com.apple.dock show-recents -bool false' 2>&1 || true
+          /bin/bash -c 'killall Dock' 2>&1 | head -2 || true
           sleep 4
+          echo "=== abrir Terminal pequeno, sin activar (no pantalla completa) ==="
+          /bin/bash -c 'osascript -e "tell application \"Terminal\" to do script \"sw_vers; uname -a; echo ESCORITORIO-ACTIVO\"" -e "tell application \"Terminal\" to set bounds of front window to {40, 70, 780, 480}"' 2>&1 | head -3 || true
+          sleep 6
+          /bin/bash -c 'osascript -e "tell application \"Terminal\" to set bounds of front window to {40, 70, 780, 480}"' 2>&1 | head -2 || true
+          sleep 3
           echo "=== apps abiertas ==="
-          ps ax -o command | grep -iE "Terminal.app|TextEdit" | grep -v grep | head -5 || echo "ninguna"
+          ps ax -o command | grep -iE "Terminal.app|System Settings|TextEdit" | grep -v grep | head -5 || echo "ninguna"
           echo
           echo "=== verificacion: contenido en el CENTRO de la pantalla ==="
           /bin/bash -c "/usr/sbin/screencapture -x -t jpg /tmp/check.jpg" 2>&1 || true
