@@ -3,6 +3,9 @@ name: macOS 26 con noVNC (navegador)
 on:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   novnc:
     runs-on: macos-26
@@ -16,6 +19,13 @@ jobs:
           screencapture -x /tmp/shot.png 2>&1 || true
           ls -la /tmp/shot.png 2>/dev/null || echo "sin captura"
           sips -g pixelWidth -g pixelHeight /tmp/shot.png 2>/dev/null || true
+
+      - name: Fijar credenciales de login (usuario runner)
+        run: |
+          sudo dscl . -passwd /Users/runner macos26 2>&1 || echo "dscl fallo"
+          sudo defaults write /Library/Preferences/com.apple.loginwindow autoLoginUser -string runner 2>/dev/null || true
+          sudo defaults write /Library/Preferences/com.apple.loginwindow autoLoginUserScreenLocked -bool false 2>/dev/null || true
+          echo "LOGIN -> usuario: runner / contrasena: macos26"
 
       - name: Habilitar Screen Sharing (VNC)
         run: |
@@ -51,13 +61,21 @@ jobs:
           sleep 4
           nohup /tmp/cloudflared tunnel --url http://localhost:6080 >/tmp/cf.log 2>&1 &
           sleep 18
+          URL=$(grep -oE "https://[a-zA-Z0-9.-]+\.trycloudflare\.com" /tmp/cf.log | head -1)
           echo "========== URL noVNC =========="
-          grep -oE "https://[a-zA-Z0-9.-]+\.trycloudflare\.com" /tmp/cf.log | head -1
+          echo "$URL"
           echo "================================"
           echo "--- websockify.log ---"; cat /tmp/websockify.log
           echo "--- cf.log (fin) ---"; tail -6 /tmp/cf.log
+          git checkout -B main origin/main 2>/dev/null || git checkout -B main
+          git config user.email "novnc-bot@users.noreply.github.com"
+          git config user.name "novnc-bot"
+          echo "$URL" > URL.txt
+          git add URL.txt
+          git commit -q -m "URL noVNC" || true
+          git push "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" main 2>&1 | tail -3 || true
 
       - name: Mantener vivo (conectate desde el navegador)
         run: |
-          echo "El tunel sigue activo."
+          echo "Tunel activo. Login macOS -> usuario: runner / contrasena: macos26"
           sleep 3600
