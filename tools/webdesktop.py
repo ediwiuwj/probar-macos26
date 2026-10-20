@@ -70,6 +70,45 @@ def run_via_bash(cmd, timeout=15):
         return None
 
 
+SCALE_FILE = "/tmp/wd_scale"
+_scale_cache = {"mtime": 0.0, "v": 1.0}
+
+
+def read_scale():
+    """Factor de escala en runtime (lo cambia /set?scale=)."""
+    try:
+        st = os.stat(SCALE_FILE)
+        if st.st_mtime != _scale_cache["mtime"]:
+            with open(SCALE_FILE) as f:
+                _scale_cache["v"] = max(0.1, min(1.0, float(f.read().strip() or 1.0)))
+            _scale_cache["mtime"] = st.st_mtime
+    except Exception:
+        _scale_cache["v"] = 1.0
+    return _scale_cache["v"]
+
+
+def downscale(img, iw, ih, sc):
+    """Reescala la imagen con CoreGraphics (CPU)."""
+    try:
+        from Quartz import (CGBitmapContextCreate, CGBitmapContextCreateImage,
+                            CGColorSpaceCreateDeviceRGB, CGContextDrawImage,
+                            CGRectMake, CGContextSetInterpolationQuality,
+                            kCGImageAlphaPremultipliedFirst,
+                            kCGBitmapByteOrder32Host, kCGInterpolationMedium)
+        w2, h2 = max(1, int(iw * sc)), max(1, int(ih * sc))
+        cs = CGColorSpaceCreateDeviceRGB()
+        ctx = CGBitmapContextCreate(
+            None, w2, h2, 8, w2 * 4, cs,
+            kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Host)
+        if ctx is None:
+            return None
+        CGContextSetInterpolationQuality(ctx, kCGInterpolationMedium)
+        CGContextDrawImage(ctx, CGRectMake(0, 0, w2, h2), img)
+        return CGBitmapContextCreateImage(ctx)
+    except Exception:
+        return None
+
+
 # ---------------------------------------------------------------- captura (hijo)
 
 def capture_worker(q, fps, quality):
@@ -103,6 +142,14 @@ def capture_worker(q, fps, quality):
             ih = CGImageGetHeight(img)
             sw = CGDisplayPixelsWide(did)
             sh = CGDisplayPixelsHigh(did)
+
+            sc = read_scale()
+            if sc != 1.0:
+                img2 = downscale(img, iw, ih, sc)
+                if img2 is not None:
+                    img = img2
+                    iw = CGImageGetWidth(img)
+                    ih = CGImageGetHeight(img)
 
             t0e = time.time()
             data = None
@@ -335,6 +382,10 @@ setInterval(()=>{hud.textContent='macOS 26 - '+new Date().toLocaleTimeString();}
 
 class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
+    # CRITICO: sin esto, Nagle + delayed ACK anaden decenas de ms por frame
+    # (escrituras pequenas de ~30KB) y el stream se queda en ~8 fps.
+    disable_nagle_algorithm = True
+    tcp_nodelay = True
 
     def log_message(self, fmt, *args):
         pass
@@ -387,6 +438,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self._send(503, b"sin captura", "text/plain")
             else:
                 self._send(200, data, "image/jpeg")
+        elif path == "/set":
+            try:
+                from urllib.parse import urlparse, parse_qs
+                qp = parse_qs(urlparse(self.path).query)
+                v = max(0.1, min(1.0, float(qp.get("scale", ["1.0"])[0])))
+                with open(SCALE_FILE, "w") as f:
+                    f.write(str(v))
+                self._send(200, json.dumps({"scale": v}), "application/json")
+            except Exception as e:
+                self._send(400, json.dumps({"error": str(e)[:120]}),
+                           "application/json")
         elif path == "/info":
             with LOCK:
                 fps = STATE["fps"]
@@ -395,6 +457,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 sw, sh = STATE["sw"], STATE["sh"]
             self._send(200, json.dumps({"width": iw, "height": ih,
                                         "screen_w": sw, "screen_h": sh,
+                                        "scale": read_scale(),
                                         "fps": round(fps, 1), "backend": backend}),
                        "application/json")
         elif path == "/profile":
