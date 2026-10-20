@@ -31,7 +31,7 @@ jobs:
       - name: Instalar noVNC + websockify + cloudflared
         run: |
           mkdir -p /tmp/novnc
-          curl -fsSL -o /tmp/novnc.tar.gz https://github.com/novnc/noVNC/archive/refs/tags/v1.5.0.tar.gz
+          curl -fsSL --retry 3 -o /tmp/novnc.tar.gz https://github.com/novnc/noVNC/archive/refs/tags/v1.5.0.tar.gz
           tar -xzf /tmp/novnc.tar.gz -C /tmp/novnc --strip-components=1
           echo "noVNC OK: $(ls /tmp/novnc/vnc.html >/dev/null 2>&1 && echo si || echo no)"
           python3 -m venv /tmp/venv
@@ -39,7 +39,8 @@ jobs:
           WS=$(/tmp/venv/bin/python -c "import websockify,os;print(os.path.dirname(websockify.__file__))")
           echo "websockify: $WS"
           echo "$WS" > /tmp/ws_path
-          curl -fsSL -o /tmp/cloudflared https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-arm64
+          curl -fsSL --retry 3 -o /tmp/cloudflared.tgz https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-arm64.tgz
+          tar -xzf /tmp/cloudflared.tgz -C /tmp cloudflared
           chmod +x /tmp/cloudflared
           /tmp/cloudflared --version 2>&1 | head -2
 
@@ -60,18 +61,3 @@ jobs:
         run: |
           echo "El tunel sigue activo."
           sleep 3600
-
-  imagen:
-    runs-on: macos-26
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Extraer imagen oficial de macOS 26 (forzado a 26.6)
-        run: |
-          echo "== softwareupdate --fetch-full-installer 26.6 =="
-          softwareupdate --fetch-full-installer --full-installer-version 26.6 --agree-to-license 2>&1 | tail -8 || true
-          echo
-          ls -la /Applications/ 2>/dev/null | grep -i "Install macOS" || echo "no se encontro instalador en /Applications"
-          echo
-          find /Applications -maxdepth 4 \( -iname "*.dmg" -o -iname "*.ipsw" \) 2>/dev/null | head -10 || true
