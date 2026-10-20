@@ -25,7 +25,8 @@ import threading
 import time
 
 SHOT = "/tmp/webdesktop.jpg"
-STATE = {"data": b"", "mtime": 0.0, "seq": 0, "fps": 0.0, "backend": "?"}
+STATE = {"data": b"", "mtime": 0.0, "seq": 0, "fps": 0.0, "backend": "?",
+         "iw": 1024, "ih": 768, "sw": 1024, "sh": 768}
 LOCK = threading.Lock()
 SCREEN = {"w": 1024, "h": 768}
 FPS = float(os.environ.get("FPS", "30"))
@@ -43,7 +44,8 @@ KEYMAP = {
 try:
     from Quartz import (
         CGMainDisplayID, CGDisplayCreateImage, CGDisplayPixelsWide,
-        CGDisplayPixelsHigh, CGImageDestinationCreateWithURL,
+        CGDisplayPixelsHigh, CGImageGetWidth, CGImageGetHeight,
+        CGImageDestinationCreateWithURL,
         CGImageDestinationAddImage, CGImageDestinationFinalize,
         CFURLCreateFromFileSystemRepresentation,
         kCGImageDestinationLossyCompressionQuality,
@@ -105,6 +107,23 @@ def capture_quartz():
         try:
             img = CGDisplayCreateImage(did)
             if img is not None:
+                # Tamano real de la IMAGEN capturada y del display actual.
+                # Se recalcula en cada frame: si el usuario cambia la
+                # resolucion en Ajustes, el mapeo del puntero se corrige solo.
+                try:
+                    iw = CGImageGetWidth(img)
+                    ih = CGImageGetHeight(img)
+                    sw = CGDisplayPixelsWide(did)
+                    sh = CGDisplayPixelsHigh(did)
+                except Exception:
+                    iw = ih = sw = sh = 0
+                if iw and ih:
+                    with LOCK:
+                        STATE["iw"] = iw
+                        STATE["ih"] = ih
+                        STATE["sw"] = sw or iw
+                        STATE["sh"] = sh or ih
+                    SCREEN["w"], SCREEN["h"] = sw or iw, sh or ih
                 data = None
                 if mem_ok:
                     try:
@@ -170,8 +189,18 @@ def cliclick(*args):
 
 def handle_event(ev):
     kind = ev.get("kind")
-    x = int(ev.get("x", 0))
-    y = int(ev.get("y", 0))
+    # El navegador envia coordenadas en pixeles de la IMAGEN que ve.
+    # Las convertimos a pixeles de PANTALLA, que pueden diferir si la
+    # captura esta escalada o si se cambio la resolucion.
+    with LOCK:
+        iw = STATE["iw"] or 1
+        ih = STATE["ih"] or 1
+        sw = STATE["sw"] or iw
+        sh = STATE["sh"] or ih
+    x_img = int(ev.get("x", 0))
+    y_img = int(ev.get("y", 0))
+    x = int(round(x_img * sw / iw))
+    y = int(round(y_img * sh / ih))
     if kind == "move":
         cliclick(f"m:{x},{y}")
     elif kind == "down":
@@ -200,34 +229,45 @@ HTML = """<!doctype html>
             font:13px system-ui;overflow:hidden}
   #stage{position:absolute;inset:4px;display:flex;align-items:center;
          justify-content:center}
-  img{max-width:100%;max-height:100%;width:auto;height:auto;
-      object-fit:contain;image-rendering:auto;user-select:none;
-      cursor:crosshair;border:1px solid #2b2b33;box-shadow:0 0 30px #000}
+  img{max-width:100%;max-height:100%;width:auto;height:auto;display:block;
+      image-rendering:auto;user-select:none;cursor:crosshair;
+      border:1px solid #2b2b33;box-shadow:0 0 30px #000}
+  #mk{position:absolute;width:16px;height:16px;margin:-8px 0 0 -8px;
+      border:2px solid #ff3b30;border-radius:50%;display:none;
+      pointer-events:none;box-shadow:0 0 6px #000}
   #hud{position:fixed;top:8px;left:10px;background:#000b;padding:4px 9px;
        border-radius:6px;font-size:11px;pointer-events:none}
   #bar{position:fixed;bottom:8px;left:10px;background:#000b;padding:5px 11px;
        border-radius:6px;font-size:11px}
 </style></head><body>
-<div id="stage"><img id="s" src="/stream.mjpeg"></div>
+<div id="stage"><div id="wrap" style="position:relative;display:flex;align-items:center;justify-content:center">
+  <img id="s" src="/stream.mjpeg"><div id="mk"></div></div></div>
 <div id="hud">macOS 26</div>
 <div id="bar">raton: clic / arrastrar &nbsp;|&nbsp; teclado: escribe en la pagina &nbsp;|&nbsp; <span id="fps">-</span> fps</div>
 <script>
 const img=document.getElementById('s'), hud=document.getElementById('hud');
+const mk=document.getElementById('mk');
 let W=1024,H=768,lastMove=0;
 function refreshInfo(){fetch('/info').then(r=>r.json()).then(j=>{
   W=j.width;H=j.height;
   document.getElementById('fps').textContent=j.fps.toFixed(1);
-});}
-refreshInfo(); setInterval(refreshInfo,1000);
+}).catch(()=>{});}
+refreshInfo(); setInterval(refreshInfo,500);
 function pos(e){const r=img.getBoundingClientRect();
   if(!r.width||!r.height) return {x:0,y:0};
   return {x:Math.max(0,Math.min(W-1,Math.round((e.clientX-r.left)/r.width*W))),
           y:Math.max(0,Math.min(H-1,Math.round((e.clientY-r.top)/r.height*H)))};}
+function mark(e){const r=img.getBoundingClientRect();
+  if(!r.width||!r.height)return;
+  mk.style.display='block';
+  mk.style.left=(e.clientX-r.left)+'px';
+  mk.style.top=(e.clientY-r.top)+'px';}
 function send(ev){fetch('/event',{method:'POST',headers:{'Content-Type':'application/json'},
   body:JSON.stringify(ev)}).catch(()=>{});}
 img.addEventListener('mousemove',e=>{const now=Date.now();if(now-lastMove<50)return;
   lastMove=now;send({kind:'move',...pos(e)});});
-img.addEventListener('mousedown',e=>{e.preventDefault();send({kind:'down',...pos(e)});});
+img.addEventListener('mousedown',e=>{e.preventDefault();mark(e);
+  send({kind:'down',...pos(e)});});
 window.addEventListener('mouseup',e=>{send({kind:'up',...pos(e)});});
 img.addEventListener('contextmenu',e=>e.preventDefault());
 img.addEventListener('wheel',e=>{e.preventDefault();send({kind:'scroll',dy:e.deltaY});});
@@ -298,7 +338,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             with LOCK:
                 fps = STATE["fps"]
                 backend = STATE["backend"]
-            self._send(200, json.dumps({"width": SCREEN["w"], "height": SCREEN["h"],
+                iw = STATE["iw"]
+                ih = STATE["ih"]
+                sw = STATE["sw"]
+                sh = STATE["sh"]
+            self._send(200, json.dumps({"width": iw, "height": ih,
+                                        "screen_w": sw, "screen_h": sh,
                                         "fps": round(fps, 1), "backend": backend}),
                        "application/json")
         else:
