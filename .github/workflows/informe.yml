@@ -18,64 +18,52 @@ jobs:
           mkdir -p /tmp/rep
           R=/tmp/rep/REPORT.txt
           exec > >(tee "$R") 2>&1
-          echo "################ 1. BUSCAR LA PASSWORD DE LA CUENTA ################"
-          echo "--- keychain System: com.apple.loginwindow ---"
-          sudo security find-generic-password -a runner -s com.apple.loginwindow -w /Library/Keychains/System.keychain 2>&1 || true
-          echo "--- keychain login del usuario ---"
-          sudo security find-generic-password -a runner -s com.apple.loginwindow -w "/Users/runner/Library/Keychains/login.keychain-db" 2>&1 || true
-          echo "--- cualquier generic-password de runner en System.keychain ---"
-          sudo security dump-keychain /Library/Keychains/System.keychain 2>/dev/null | grep -iE "loginwindow|runner" | head -20 || echo "sin coincidencias"
-          echo "--- lista de entradas del keychain de sistema (servicios) ---"
-          sudo security dump-keychain /Library/Keychains/System.keychain 2>/dev/null | grep -E "^\s+\"svce\"" | sort -u | head -30 || true
+          ANKA="/Library/Application Support/Veertu/Anka"
+          echo "################ 1. ADDOONS DE ANKA ################"
+          ls -la "$ANKA/addons" "$ANKA/bin" 2>&1 | head -40
           echo
-          echo "--- dscl: borrar _writers_passwd y reintentar ---"
-          sudo dscl . -delete /Users/runner dsAttrTypeNative:_writers_passwd 2>&1 || true
-          sudo dscl . -passwd /Users/runner macos26 2>&1 | head -3 || true
-          echo "--- verificar ---"
+          echo "=== kcpassword ==="
+          file "$ANKA/addons/kcpassword" 2>&1
+          head -60 "$ANKA/addons/kcpassword" 2>&1
+          echo
+          echo "=== change_res ==="
+          head -40 "$ANKA/addons/change_res" 2>&1
+          echo
+          echo "=== bin/click ==="
+          head -30 "$ANKA/bin/click" 2>&1
+          echo
+          echo "=== como se invoca kcpassword (procesos/servicios) ==="
+          ps ax -o pid,command | grep -iE "kcpassword|addonsd" | grep -v grep || echo "ninguno"
+          echo
+          echo "################ 2. USAR kcpassword PARA FIJAR LA PASSWORD ################"
+          echo "--- intentos con distintos argumentos ---"
+          for arg in "macos26" "-u runner macos26" "runner macos26" "--user runner --password macos26"; do
+            echo ">>> kcpassword $arg"
+            sudo "$ANKA/addons/kcpassword" $arg 2>&1 | head -5 || true
+            sudo dscl . -authonly runner macos26 >/dev/null 2>&1 && { echo "   >>> PASSWORD macos26 AHORA CORRECTA"; break; } || echo "   (aun incorrecta)"
+          done
+          echo "--- otros comandos posibles de kcpassword ---"
+          sudo "$ANKA/addons/kcpassword" --help 2>&1 | head -15 || true
+          sudo "$ANKA/addons/kcpassword" -h 2>&1 | head -15 || true
+          echo
+          echo "################ 3. ESTADO DE PASSWORD ################"
           sudo dscl . -authonly runner macos26 2>&1 && echo "PASSWORD macos26: CORRECTA" || echo "PASSWORD macos26: INCORRECTA"
           echo
-          echo "--- dscl: pasar old vacio + nuevo ---"
-          sudo dscl . -passwd /Users/runner "" macos26 2>&1 | head -3 || true
-          sudo dscl . -authonly runner macos26 2>&1 && echo "PASSWORD macos26: CORRECTA" || echo "PASSWORD macos26: INCORRECTA"
-          echo
-          echo "--- volcado completo del registro runner (buscando pistas) ---"
-          sudo dscl . -read /Users/runner 2>&1 | head -40
-          echo
-          echo "--- kcpassword / autoLogin en prefs ---"
-          sudo defaults read /Library/Preferences/com.apple.loginwindow 2>&1 | head -25
-          echo
-          echo "--- variables de entorno / ficheros de provision con PASSWORD ---"
-          sudo grep -rIl --exclude-dir=Library -e "vm_password" -e "USER_PASSWORD" /Users/runner /Library/Application\ Support/Veertu 2>/dev/null | head -10 || true
-          sudo find /Library/Application\ Support/Veertu -maxdepth 3 -type f 2>/dev/null | head -20 || true
-          echo
-          echo "################ 2. ESTADO DE PANTALLAS ################"
-          system_profiler SPDisplaysDataType 2>&1 | head -40
-          echo "--- CoreGraphics displays via python ---"
-          cat > /tmp/dpy.py <<'PYEOF'
-          try:
-              from Quartz import CGGetActiveDisplayList, CGDisplayPixelsWide, CGDisplayPixelsHigh, CGDisplayBounds
-              n, ids = CGGetActiveDisplayList(16, None)
-              arr = [0]*n
-              from Quartz import CGGetActiveDisplayList as G
-              err, ids = G(16, arr)
-              for i, d in enumerate(arr[:err]):
-                  print(f"display {i}: id={d} {CGDisplayPixelsWide(d)}x{CGDisplayPixelsHigh(d)} bounds={CGDisplayBounds(d)}")
-              if err == 0:
-                  print("sin displays activos")
-          except Exception as e:
-              print("Quartz no disponible:", e)
-          PYEOF
-          python3 /tmp/dpy.py 2>&1 || true
-          echo
-          echo "################ 3. VNC LEGACY + SONDA ################"
+          echo "################ 4. PROBAR ARD (sin legacy) CON LA PASSWORD ################"
           KS=/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart
-          sudo "$KS" -activate -configure -access -on -users runner -privs -all \
-            -clientopts -setvnclegacy -vnclegacy yes -setvncpw -vncpw macos26 \
-            -restart -agent 2>&1 | tail -8
+          sudo "$KS" -activate -configure -access -on -users runner -privs -all -restart -agent 2>&1 | tail -6
           sleep 8
-          python3 tools/vncprobe.py macos26 2>&1 || true
+          echo "--- security types offered (sin legacy) ---"
+          python3 - <<'PYEOF' 2>&1
+          import socket
+          s = socket.create_connection(('127.0.0.1', 5900), timeout=10)
+          s.recv(12); s.sendall(b'RFB 003.008\n')
+          n = s.recv(1)[0]
+          print("types:", list(s.recv(n)))
+          s.close()
+          PYEOF
           echo
-          echo "################ 4. FIN ################"
+          echo "################ 5. FIN ################"
 
       - name: Publicar informe
         run: |
@@ -89,7 +77,6 @@ jobs:
           git commit -q -m "REPORT" || true
           PUSH="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           git push "$PUSH" main > /tmp/push.log 2>&1 || {
-            echo "push fallo, reintento con rebase"
             git pull --rebase origin main 2>&1 | tail -2
             cp /tmp/rep/REPORT.txt ./REPORT.txt
             git add -f REPORT.txt
