@@ -104,6 +104,7 @@ def capture_quartz():
         from Quartz import CGImageDestinationCreateWithData
     except Exception:
         mem_ok = False
+    bench_n = 0
     while True:
         t = time.time()
         try:
@@ -167,6 +168,42 @@ def capture_quartz():
                         STATE["t_encode"] = (STATE["t_encode"] * a + t_encode) / n
                         STATE["t_publish"] = (STATE["t_publish"] * a + t_publish) / n
                     frames += 1
+                    # micro-benchmark del encoder cada ~200 frames
+                    bench_n += 1
+                    if bench_n >= 200 and mem_ok:
+                        bench_n = 0
+                        try:
+                            from Quartz import (CGImageCreateWithImageInRect,
+                                                CGRectMake)
+                            iw2 = CGImageGetWidth(img)
+                            ih2 = CGImageGetHeight(img)
+                            out = {}
+                            for label, (sc, q) in (
+                                    ("full_q35", (1.0, 0.35)),
+                                    ("half_q35", (0.5, 0.35)),
+                                    ("quarter_q35", (0.25, 0.35)),
+                                    ("full_q20", (1.0, 0.20))):
+                                g = img
+                                if sc != 1.0:
+                                    g = CGImageCreateWithImageInRect(
+                                        img, CGRectMake(0, 0,
+                                                        int(iw2 * sc),
+                                                        int(ih2 * sc)))
+                                t = time.time()
+                                b = NSMutableData.data()
+                                dd = CGImageDestinationCreateWithData(
+                                    b, "public.jpeg", 1, None)
+                                CGImageDestinationAddImage(
+                                    dd, g,
+                                    {kCGImageDestinationLossyCompressionQuality: q})
+                                CGImageDestinationFinalize(dd)
+                                out[label] = [round((time.time() - t) * 1000, 2),
+                                              len(b)]
+                            with LOCK:
+                                STATE["bench"] = out
+                        except Exception as e:
+                            with LOCK:
+                                STATE["bench"] = {"error": str(e)[:100]}
                     el = time.time() - t0
                     if el > 1:
                         with LOCK:
@@ -374,6 +411,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     "cpu_count": os.cpu_count(),
                     "fps": round(STATE["fps"], 1),
                     "backend": STATE["backend"],
+                    "bench_ms_bytes": STATE.get("bench", {}),
                 }
             self._send(200, json.dumps(info), "application/json")
         else:
