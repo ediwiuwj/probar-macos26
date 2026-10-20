@@ -17,26 +17,49 @@ jobs:
         run: |
           echo "usuario: $(whoami) / $(id -un)"
           screencapture -x /tmp/shot.png 2>&1 || true
-          ls -la /tmp/shot.png 2>/dev/null || echo "sin captura"
           sips -g pixelWidth -g pixelHeight /tmp/shot.png 2>/dev/null || true
 
-      - name: Fijar credenciales de login (usuario runner)
+      - name: Fijar password del usuario runner (varios metodos)
         run: |
-          sudo dscl . -passwd /Users/runner macos26 2>&1 || echo "dscl fallo"
-          sudo defaults write /Library/Preferences/com.apple.loginwindow autoLoginUser -string runner 2>/dev/null || true
-          sudo defaults write /Library/Preferences/com.apple.loginwindow autoLoginUserScreenLocked -bool false 2>/dev/null || true
-          echo "LOGIN -> usuario: runner / contrasena: macos26"
+          echo "== metodo 1: dscl -passwd =="
+          sudo dscl . -passwd /Users/runner macos26 2>&1 | head -3 || true
+          echo "== metodo 2: passwd =="
+          printf 'macos26\nmacos26\n' | sudo passwd runner 2>&1 | head -5 || true
+          echo "== metodo 3: sysadminctl =="
+          sudo sysadminctl -adminUser runner -newPassword macos26 2>&1 | head -5 || true
+          echo "== verificacion (authonly) =="
+          sudo dscl . -authonly runner macos26 2>&1 && echo "PASSWORD macos26: CORRECTA" || echo "PASSWORD macos26: INCORRECTA"
 
-      - name: Habilitar Screen Sharing (VNC)
+      - name: Activar VNC Legacy con password (sintaxis correcta)
         run: |
-          sudo launchctl load -w /System/Library/LaunchDaemons/com.apple.screensharing.plist 2>/dev/null || true
-          sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart \
-            -activate -configure -access -on -users runner -privs -all \
-            -clientopts -setvncpw -vncpw macos26 \
-            -restart -agent 2>&1 || true
-          sleep 6
-          sudo launchctl list 2>/dev/null | grep -i screensharing || echo "screensharing no aparece en launchctl"
+          KS=/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart
+          sudo "$KS" -activate -configure -access -on -users runner -privs -all \
+            -clientopts -setvnclegacy -vnclegacy yes -setvncpw -vncpw macos26 \
+            -restart -agent 2>&1 | tail -20
+          sleep 8
+          echo "=== prefs ==="
+          sudo defaults read /Library/Preferences/com.apple.RemoteManagement 2>/dev/null | grep -iE "vnc|password" || true
+          echo "=== puerto 5900 ==="
           (nc -z 127.0.0.1 5900 && echo "puerto 5900 ABIERTO") || echo "puerto 5900 cerrado"
+
+      - name: Handshake RFB (metodos de auth ofrecidos)
+        run: |
+          cat > /tmp/rfb.py <<'PYEOF'
+          import socket
+          s = socket.create_connection(('127.0.0.1', 5900), timeout=10)
+          print("version:", s.recv(12))
+          s.sendall(b'RFB 003.008\n')
+          n = s.recv(1)
+          if not n:
+              print("sin security types"); raise SystemExit
+          n = n[0]
+          types = list(s.recv(n))
+          names = {1:'None',2:'VNC Auth clasico (solo password)',16:'Tight',19:'VeNCrypt',30:'Apple/ARD (user+pass)',33:'Apple ext',35:'Apple ext',36:'Apple ext'}
+          print("security types:", [(t, names.get(t,'?')) for t in types])
+          print("VNC CLASICO DISPONIBLE:" , "SI" if 2 in types else "NO")
+          s.close()
+          PYEOF
+          python3 /tmp/rfb.py 2>&1 || echo "handshake fallo"
 
       - name: Instalar noVNC + websockify + cloudflared
         run: |
@@ -45,14 +68,13 @@ jobs:
           tar -xzf /tmp/novnc.tar.gz -C /tmp/novnc --strip-components=1
           echo "noVNC OK: $(ls /tmp/novnc/vnc.html >/dev/null 2>&1 && echo si || echo no)"
           python3 -m venv /tmp/venv
-          /tmp/venv/bin/pip install -q websockify 2>&1 | tail -3
+          /tmp/venv/bin/pip install -q websockify 2>&1 | tail -2
           WS=$(/tmp/venv/bin/python -c "import websockify,os;print(os.path.dirname(websockify.__file__))")
-          echo "websockify: $WS"
           echo "$WS" > /tmp/ws_path
           curl -fsSL --retry 3 -o /tmp/cloudflared.tgz https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-arm64.tgz
           tar -xzf /tmp/cloudflared.tgz -C /tmp cloudflared
           chmod +x /tmp/cloudflared
-          /tmp/cloudflared --version 2>&1 | head -2
+          /tmp/cloudflared --version 2>&1 | head -1
 
       - name: Levantar noVNC + tunel Cloudflare
         run: |
@@ -66,16 +88,15 @@ jobs:
           echo "$URL"
           echo "================================"
           echo "--- websockify.log ---"; cat /tmp/websockify.log
-          echo "--- cf.log (fin) ---"; tail -6 /tmp/cf.log
           git checkout -B main origin/main 2>/dev/null || git checkout -B main
           git config user.email "novnc-bot@users.noreply.github.com"
           git config user.name "novnc-bot"
           echo "$URL" > URL.txt
           git add URL.txt
           git commit -q -m "URL noVNC" || true
-          git push "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" main 2>&1 | tail -3 || true
+          git push "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" main 2>&1 | tail -2 || true
 
-      - name: Mantener vivo (conectate desde el navegador)
+      - name: Mantener vivo
         run: |
-          echo "Tunel activo. Login macOS -> usuario: runner / contrasena: macos26"
+          echo "Tunel activo. Si pide password: macos26. Si pide usuario: runner."
           sleep 3600
