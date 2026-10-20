@@ -1,0 +1,70 @@
+name: Diagnostico VNC macOS 26
+
+on:
+  workflow_dispatch:
+
+jobs:
+  diag:
+    runs-on: macos-26
+    timeout-minutes: 15
+    steps:
+      - name: Password del usuario runner
+        run: |
+          echo "=== password actual del usuario runner ==="
+          sudo dscl . -read /Users/runner 2>/dev/null | grep -iE "RecordName|UniqueID|passwd" || true
+          echo
+          echo "=== probar dscl -passwd ==="
+          sudo dscl . -passwd /Users/runner macos26 2>&1 && echo "dscl passwd: OK" || echo "dscl passwd: FALLO"
+          echo
+          echo "=== verificar con dscl -authonly ==="
+          sudo dscl . -authonly runner macos26 && echo "PASSWORD macos26: CORRECTA" || echo "PASSWORD macos26: INCORRECTA"
+          echo
+          echo "=== grupos del usuario ==="
+          id runner
+          echo
+          echo "=== shell del usuario ==="
+          dscl . -read /Users/runner UserShell 2>/dev/null || true
+
+      - name: Opciones de kickstart (clientopts / vncpw)
+        run: |
+          KS=/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart
+          echo "=== help ==="
+          sudo "$KS" -help 2>&1 | grep -iE -B2 -A4 "clientopts|vncpw|vnclegacy|password|legacy" | head -60
+          echo
+          echo "===fin help ==="
+
+      - name: Handshake RFB (que metodos de auth ofrece)
+        run: |
+          cat > /tmp/rfb.py <<'PYEOF'
+          import socket, sys
+          def probe(host='127.0.0.1', port=5900):
+              s = socket.create_connection((host, port), timeout=10)
+              ver = s.recv(12)
+              print("version servidor:", ver)
+              s.sendall(b'RFB 003.008\n')
+              n = s.recv(1)
+              if not n:
+                  print("sin security types"); return
+              n = n[0]
+              types = list(s.recv(n))
+              names = {1:'None',2:'VNC Auth (clasico, password)',16:'Tight',19:'VeNCrypt',30:'Apple/ARD (user+pass)'}
+              print("security types:", [(t, names.get(t,'?')) for t in types])
+              s.close()
+          probe()
+          PYEOF
+          python3 /tmp/rfb.py 2>&1 || echo "handshake fallo"
+
+      - name: Activar modo VNC legacy con password
+        run: |
+          KS=/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart
+          echo "=== kickstart con -setvnclegacy ==="
+          sudo "$KS" -activate -configure -access -on -users runner -privs -all \
+            -clientopts -setvnclegacy -setvncpw -vncpw macos26 \
+            -restart -agent 2>&1 | tail -25
+          sleep 8
+          echo
+          echo "=== handshake RFB de nuevo ==="
+          python3 /tmp/rfb.py 2>&1 || echo "handshake fallo"
+          echo
+          echo "=== defaults VNCPassword ==="
+          sudo defaults read /Library/Preferences/com.apple.RemoteManagement 2>/dev/null | head -20 || echo "sin prefs"
