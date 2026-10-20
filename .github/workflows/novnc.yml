@@ -19,54 +19,108 @@ jobs:
           screencapture -x /tmp/shot.png 2>&1 || true
           sips -g pixelWidth -g pixelHeight /tmp/shot.png 2>/dev/null || true
 
-      - name: Fijar password del usuario runner (varios metodos)
-        run: |
-          echo "== metodo 1: dscl -passwd =="
-          sudo dscl . -passwd /Users/runner macos26 2>&1 | head -3 || true
-          echo "== metodo 2: passwd =="
-          printf 'macos26\nmacos26\n' | sudo passwd runner 2>&1 | head -5 || true
-          echo "== metodo 3: sysadminctl =="
-          sudo sysadminctl -adminUser runner -newPassword macos26 2>&1 | head -5 || true
-          echo "== verificacion (authonly) =="
-          sudo dscl . -authonly runner macos26 2>&1 && echo "PASSWORD macos26: CORRECTA" || echo "PASSWORD macos26: INCORRECTA"
-
-      - name: Activar VNC Legacy con password (sintaxis correcta)
+      - name: Activar VNC Legacy con password conocida
         run: |
           KS=/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart
           sudo "$KS" -activate -configure -access -on -users runner -privs -all \
             -clientopts -setvnclegacy -vnclegacy yes -setvncpw -vncpw macos26 \
-            -restart -agent 2>&1 | tail -20
+            -restart -agent 2>&1 | tail -15
           sleep 8
-          echo "=== prefs ==="
-          sudo defaults read /Library/Preferences/com.apple.RemoteManagement 2>/dev/null | grep -iE "vnc|password" || true
+          echo "=== VNCLegacyConnectionsEnabled ==="
+          sudo defaults read /Library/Preferences/com.apple.RemoteManagement VNCLegacyConnectionsEnabled 2>&1
+          echo "=== donde vive el password VNC ==="
+          sudo plutil -p /Library/Preferences/com.apple.RemoteManagement.plist 2>&1 | head -20
+          sudo plutil -p /var/root/Library/Preferences/com.apple.RemoteManagement.plist 2>&1 | head -20
+          echo "=== busqueda ==="
+          sudo find /Library/Preferences /var/root /private/var/db -iname "*RemoteManagement*" 2>/dev/null | head -10
           echo "=== puerto 5900 ==="
           (nc -z 127.0.0.1 5900 && echo "puerto 5900 ABIERTO") || echo "puerto 5900 cerrado"
 
-      - name: Handshake RFB (metodos de auth ofrecidos)
+      - name: Test local de auth VNC con password macos26
         run: |
-          cat > /tmp/rfb.py <<'PYEOF'
-          import socket
-          s = socket.create_connection(('127.0.0.1', 5900), timeout=10)
-          print("version:", s.recv(12))
-          s.sendall(b'RFB 003.008\n')
-          n = s.recv(1)
-          if not n:
-              print("sin security types"); raise SystemExit
-          n = n[0]
-          types = list(s.recv(n))
-          names = {1:'None',2:'VNC Auth clasico (solo password)',16:'Tight',19:'VeNCrypt',30:'Apple/ARD (user+pass)',33:'Apple ext',35:'Apple ext',36:'Apple ext'}
-          print("security types:", [(t, names.get(t,'?')) for t in types])
-          print("VNC CLASICO DISPONIBLE:" , "SI" if 2 in types else "NO")
-          s.close()
-          PYEOF
-          python3 /tmp/rfb.py 2>&1 || echo "handshake fallo"
+          cat > /tmp/vnctest.py <<'PYEOF'
+          import socket, struct, subprocess, shutil, os, sys
 
-      - name: Instalar noVNC + websockify + cloudflared
+          def find_openssl():
+              for c in ["openssl"]:
+                  p = shutil.which(c)
+                  if p: return p
+              for c in ["/opt/homebrew/opt/openssl@3/bin/openssl", "/opt/homebrew/bin/openssl", "/usr/local/opt/openssl@3/bin/openssl"]:
+                  if os.path.exists(c): return c
+              return None
+
+          def des_ecb(key_hex, data):
+              oss = find_openssl()
+              if not oss: return None, "sin openssl"
+              open('/tmp/_k.bin','wb').write(data)
+              cmd = [oss, 'enc', '-des-ecb', '-nopad', '-K', key_hex]
+              # openssl 3 requiere el provider legacy para DES
+              cmd += ['-provider', 'legacy', '-provider', 'default']
+              r = subprocess.run(cmd + ['-in','/tmp/_k.bin','-out','/tmp/_o.bin'],
+                                 capture_output=True)
+              if r.returncode != 0 and not os.path.exists('/tmp/_o.bin'):
+                  r2 = subprocess.run([oss,'enc','-des-ecb','-nopad','-K',key_hex,'-in','/tmp/_k.bin','-out','/tmp/_o.bin'],
+                                      capture_output=True)
+                  if r2.returncode != 0:
+                      return None, "openssl fallo: " + r2.stderr.decode()[:200]
+              return open('/tmp/_o.bin','rb').read(), "ok"
+
+          def test(pw):
+              key = pw.encode()[:8].ljust(8, b'\0')
+              key_hex = key.hex()
+              s = socket.create_connection(('127.0.0.1', 5900), timeout=10)
+              s.recv(12)
+              s.sendall(b'RFB 003.008\n')
+              n = s.recv(1)[0]
+              types = list(s.recv(n))
+              print("  security types:", types)
+              if 2 not in types:
+                  s.close(); return "NO_OFRECE_VNC_CLASICO"
+              s.sendall(bytes([2]))
+              chal = s.recv(16)
+              resp, err = des_ecb(key_hex, chal)
+              if resp is None:
+                  s.close(); return "NO_PUEDO_CIFRAR: " + err
+              s.sendall(resp)
+              res = s.recv(4)
+              status = struct.unpack('>I', res)[0]
+              reason = ""
+              if status != 0:
+                  try:
+                      ln = struct.unpack('>I', s.recv(4))[0]
+                      reason = s.recv(ln).decode('utf-8','replace')
+                  except Exception:
+                      reason = "(sin reason)"
+              s.close()
+              return "OK" if status == 0 else ("RECHAZADO: " + reason)
+
+          for pw in sys.argv[1:]:
+              print(f"  password '{pw}' -> {test(pw)}")
+          PYEOF
+          python3 /tmp/vnctest.py macos26 runner password macos tahoe admin 2>&1
+
+      - name: Instalar noVNC y PARCHEAR para preferir VNC clasico (tipo 2)
         run: |
           mkdir -p /tmp/novnc
           curl -fsSL --retry 3 -o /tmp/novnc.tar.gz https://github.com/novnc/noVNC/archive/refs/tags/v1.5.0.tar.gz
           tar -xzf /tmp/novnc.tar.gz -C /tmp/novnc --strip-components=1
+          python3 - <<'PYEOF'
+          p = '/tmp/novnc/core/rfb.js'
+          s = open(p, encoding='utf-8').read()
+          old = "const types = this._sock.rQshiftBytes(numTypes);"
+          new = old + "\n            types.sort((a, b) => (a === 2 ? -1 : (b === 2 ? 1 : 0)));"
+          if old in s and 'a === 2 ? -1' not in s:
+              s = s.replace(old, new, 1)
+              open(p, 'w', encoding='utf-8').write(s)
+              print("PATCH OK: ahora noVNC prefiere el security type 2 (VNC clasico)")
+          else:
+              print("PATCH: ya aplicado o patron no encontrado")
+          PYEOF
+          grep -n "a === 2 ? -1" /tmp/novnc/core/rfb.js | head -3
           echo "noVNC OK: $(ls /tmp/novnc/vnc.html >/dev/null 2>&1 && echo si || echo no)"
+
+      - name: Instalar websockify + cloudflared
+        run: |
           python3 -m venv /tmp/venv
           /tmp/venv/bin/pip install -q websockify 2>&1 | tail -2
           WS=$(/tmp/venv/bin/python -c "import websockify,os;print(os.path.dirname(websockify.__file__))")
@@ -98,5 +152,5 @@ jobs:
 
       - name: Mantener vivo
         run: |
-          echo "Tunel activo. Si pide password: macos26. Si pide usuario: runner."
+          echo "Tunel activo. Password VNC: macos26"
           sleep 3600
