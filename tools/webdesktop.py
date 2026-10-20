@@ -26,7 +26,9 @@ import time
 
 SHOT = "/tmp/webdesktop.jpg"
 STATE = {"data": b"", "mtime": 0.0, "seq": 0, "fps": 0.0, "backend": "?",
-         "iw": 1024, "ih": 768, "sw": 1024, "sh": 768}
+         "iw": 1024, "ih": 768, "sw": 1024, "sh": 768,
+         # perfilado: medias en ms de cada fase
+         "t_capture": 0.0, "t_encode": 0.0, "t_publish": 0.0, "n": 0}
 LOCK = threading.Lock()
 SCREEN = {"w": 1024, "h": 768}
 FPS = float(os.environ.get("FPS", "30"))
@@ -105,7 +107,9 @@ def capture_quartz():
     while True:
         t = time.time()
         try:
+            t0c = time.time()
             img = CGDisplayCreateImage(did)
+            t_capture = (time.time() - t0c) * 1000
             if img is not None:
                 # Tamano real de la IMAGEN capturada y del display actual.
                 # Se recalcula en cada frame: si el usuario cambia la
@@ -125,6 +129,7 @@ def capture_quartz():
                         STATE["sh"] = sh or ih
                     SCREEN["w"], SCREEN["h"] = sw or iw, sh or ih
                 data = None
+                t0e = time.time()
                 if mem_ok:
                     try:
                         buf = NSMutableData.data()
@@ -150,7 +155,17 @@ def capture_quartz():
                         with open(SHOT, "rb") as f:
                             data = f.read()
                 if data:
+                    t_encode = (time.time() - t0e) * 1000
+                    t0p = time.time()
                     _publish(data)
+                    t_publish = (time.time() - t0p) * 1000
+                    with LOCK:
+                        n = STATE["n"] + 1
+                        STATE["n"] = n
+                        a = n - 1
+                        STATE["t_capture"] = (STATE["t_capture"] * a + t_capture) / n
+                        STATE["t_encode"] = (STATE["t_encode"] * a + t_encode) / n
+                        STATE["t_publish"] = (STATE["t_publish"] * a + t_publish) / n
                     frames += 1
                     el = time.time() - t0
                     if el > 1:
@@ -346,6 +361,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                         "screen_w": sw, "screen_h": sh,
                                         "fps": round(fps, 1), "backend": backend}),
                        "application/json")
+        elif path == "/profile":
+            with LOCK:
+                n = STATE["n"] or 1
+                info = {
+                    "frames": STATE["n"],
+                    "ms_capture": round(STATE["t_capture"], 2),
+                    "ms_encode": round(STATE["t_encode"], 2),
+                    "ms_publish": round(STATE["t_publish"], 2),
+                    "ms_total": round(STATE["t_capture"] + STATE["t_encode"]
+                                      + STATE["t_publish"], 2),
+                    "cpu_count": os.cpu_count(),
+                    "fps": round(STATE["fps"], 1),
+                    "backend": STATE["backend"],
+                }
+            self._send(200, json.dumps(info), "application/json")
         else:
             self._send(404, b"no", "text/plain")
 
