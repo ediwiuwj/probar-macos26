@@ -13,93 +13,66 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Verificar sesion grafica
+      - name: Diagnostico de pantalla
         run: |
-          echo "usuario: $(whoami) / $(id -un)"
+          echo "=== capturas: hay contenido en la consola? ==="
           screencapture -x /tmp/shot.png 2>&1 || true
+          ls -la /tmp/shot.png 2>/dev/null || echo "sin captura"
           sips -g pixelWidth -g pixelHeight /tmp/shot.png 2>/dev/null || true
+          echo
+          echo "=== procesos de screen sharing / ARD ==="
+          ps ax -o pid,command | grep -iE "screensharing|ARDAgent|RemoteManagement" | grep -v grep || echo "ninguno"
+          echo
+          echo "=== binarios candidatos ==="
+          ls -la /usr/libexec/screensharingd /usr/sbin/screensharingd /usr/libexec/ScreensharingAgent 2>/dev/null || true
+          find /System/Library/CoreServices/RemoteManagement -maxdepth 3 -name "ARDAgent" 2>/dev/null || true
+          find /System/Library/PrivateFrameworks/ScreenSharing.framework -maxdepth 4 -type f -perm +111 2>/dev/null | head -8 || true
+
+      - name: Conceder permisos TCC de captura de pantalla
+        run: |
+          DB="/Library/Application Support/com.apple.TCC/TCC.db"
+          echo "=== esquema ==="
+          sudo sqlite3 "$DB" ".schema access" | head -3
+          echo "=== entradas actuales kTCCServiceScreenCapture ==="
+          sudo sqlite3 "$DB" "SELECT client, client_type, auth_value FROM access WHERE service='kTCCServiceScreenCapture';" 2>&1
+          echo
+          CANDS=$( { ls /usr/libexec/screensharingd /usr/sbin/screensharingd /usr/libexec/ScreensharingAgent 2>/dev/null; \
+                     find /System/Library/CoreServices/RemoteManagement -maxdepth 3 -name "ARDAgent" 2>/dev/null; \
+                     find /System/Library/PrivateFrameworks/ScreenSharing.framework -maxdepth 4 -type f -perm +111 2>/dev/null; \
+                     echo /usr/libexec/screensharingd; echo /usr/sbin/screensharingd; \
+                     echo /System/Library/CoreServices/RemoteManagement/ARDAgent.app; } | sort -u )
+          echo "=== granting a: ==="; echo "$CANDS"
+          for c in $CANDS; do
+            for svc in kTCCServiceScreenCapture kTCCServiceAccessibility; do
+              sudo sqlite3 "$DB" "INSERT OR IGNORE INTO access (service, client, client_type, auth_value, auth_reason, indirect_object_identifier, indirect_object_identifier_type, flags, last_modified) SELECT '$svc', '$c', client_type, auth_value, auth_reason, indirect_object_identifier, indirect_object_identifier_type, flags, strftime('%s','now') FROM access WHERE service='$svc' AND client IN ('/bin/bash','/opt/hca/hosted-compute-agent','/usr/local/opt/runner/provisioner/provisioner') LIMIT 1;" 2>&1
+              sudo sqlite3 "$DB" "INSERT OR IGNORE INTO access (service, client, client_type, auth_value, auth_reason, indirect_object_identifier, indirect_object_identifier_type, flags, last_modified) SELECT '$svc', '$c', 1, 2, 4, NULL, NULL, 0, strftime('%s','now') WHERE NOT EXISTS (SELECT 1 FROM access WHERE service='$svc' AND client='$c');" 2>&1
+            done
+          done
+          echo "=== resultado ==="
+          sudo sqlite3 "$DB" "SELECT service, client, client_type, auth_value FROM access WHERE service IN ('kTCCServiceScreenCapture','kTCCServiceAccessibility');" 2>&1
+          echo
+          echo "=== reiniciando daemons ==="
+          sudo launchctl enable system/com.apple.screensharing 2>/dev/null || true
+          sudo launchctl kickstart -k system/com.apple.tccd 2>/dev/null || true
+          sudo launchctl kickstart -k system/com.apple.screensharing 2>/dev/null || true
+          sudo killall -HUP tccd 2>/dev/null || true
+          sleep 8
+          (nc -z 127.0.0.1 5900 && echo "puerto 5900 ABIERTO") || echo "puerto 5900 cerrado"
 
       - name: Activar VNC Legacy con password conocida
         run: |
           KS=/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart
           sudo "$KS" -activate -configure -access -on -users runner -privs -all \
             -clientopts -setvnclegacy -vnclegacy yes -setvncpw -vncpw macos26 \
-            -restart -agent 2>&1 | tail -15
+            -restart -agent 2>&1 | tail -12
           sleep 8
-          echo "=== VNCLegacyConnectionsEnabled ==="
           sudo defaults read /Library/Preferences/com.apple.RemoteManagement VNCLegacyConnectionsEnabled 2>&1
-          echo "=== donde vive el password VNC ==="
-          sudo plutil -p /Library/Preferences/com.apple.RemoteManagement.plist 2>&1 | head -20
-          sudo plutil -p /var/root/Library/Preferences/com.apple.RemoteManagement.plist 2>&1 | head -20
-          echo "=== busqueda ==="
-          sudo find /Library/Preferences /var/root /private/var/db -iname "*RemoteManagement*" 2>/dev/null | head -10
-          echo "=== puerto 5900 ==="
-          (nc -z 127.0.0.1 5900 && echo "puerto 5900 ABIERTO") || echo "puerto 5900 cerrado"
 
-      - name: Test local de auth VNC con password macos26
+      - name: Sonda VNC (mide si el framebuffer tiene contenido)
         run: |
-          cat > /tmp/vnctest.py <<'PYEOF'
-          import socket, struct, subprocess, shutil, os, sys
+          python3 tools/vncprobe.py macos26 2>&1 || true
 
-          def find_openssl():
-              for c in ["openssl"]:
-                  p = shutil.which(c)
-                  if p: return p
-              for c in ["/opt/homebrew/opt/openssl@3/bin/openssl", "/opt/homebrew/bin/openssl", "/usr/local/opt/openssl@3/bin/openssl"]:
-                  if os.path.exists(c): return c
-              return None
-
-          def des_ecb(key_hex, data):
-              oss = find_openssl()
-              if not oss: return None, "sin openssl"
-              open('/tmp/_k.bin','wb').write(data)
-              cmd = [oss, 'enc', '-des-ecb', '-nopad', '-K', key_hex]
-              # openssl 3 requiere el provider legacy para DES
-              cmd += ['-provider', 'legacy', '-provider', 'default']
-              r = subprocess.run(cmd + ['-in','/tmp/_k.bin','-out','/tmp/_o.bin'],
-                                 capture_output=True)
-              if r.returncode != 0 and not os.path.exists('/tmp/_o.bin'):
-                  r2 = subprocess.run([oss,'enc','-des-ecb','-nopad','-K',key_hex,'-in','/tmp/_k.bin','-out','/tmp/_o.bin'],
-                                      capture_output=True)
-                  if r2.returncode != 0:
-                      return None, "openssl fallo: " + r2.stderr.decode()[:200]
-              return open('/tmp/_o.bin','rb').read(), "ok"
-
-          def test(pw):
-              key = pw.encode()[:8].ljust(8, b'\0')
-              key_hex = key.hex()
-              s = socket.create_connection(('127.0.0.1', 5900), timeout=10)
-              s.recv(12)
-              s.sendall(b'RFB 003.008\n')
-              n = s.recv(1)[0]
-              types = list(s.recv(n))
-              print("  security types:", types)
-              if 2 not in types:
-                  s.close(); return "NO_OFRECE_VNC_CLASICO"
-              s.sendall(bytes([2]))
-              chal = s.recv(16)
-              resp, err = des_ecb(key_hex, chal)
-              if resp is None:
-                  s.close(); return "NO_PUEDO_CIFRAR: " + err
-              s.sendall(resp)
-              res = s.recv(4)
-              status = struct.unpack('>I', res)[0]
-              reason = ""
-              if status != 0:
-                  try:
-                      ln = struct.unpack('>I', s.recv(4))[0]
-                      reason = s.recv(ln).decode('utf-8','replace')
-                  except Exception:
-                      reason = "(sin reason)"
-              s.close()
-              return "OK" if status == 0 else ("RECHAZADO: " + reason)
-
-          for pw in sys.argv[1:]:
-              print(f"  password '{pw}' -> {test(pw)}")
-          PYEOF
-          python3 /tmp/vnctest.py macos26 runner password macos tahoe admin 2>&1
-
-      - name: Instalar noVNC y PARCHEAR para preferir VNC clasico (tipo 2)
+      - name: Instalar noVNC + parche (preferir VNC clasico)
         run: |
           mkdir -p /tmp/novnc
           curl -fsSL --retry 3 -o /tmp/novnc.tar.gz https://github.com/novnc/noVNC/archive/refs/tags/v1.5.0.tar.gz
@@ -110,14 +83,12 @@ jobs:
           old = "const types = this._sock.rQshiftBytes(numTypes);"
           new = old + "\n            types.sort((a, b) => (a === 2 ? -1 : (b === 2 ? 1 : 0)));"
           if old in s and 'a === 2 ? -1' not in s:
-              s = s.replace(old, new, 1)
-              open(p, 'w', encoding='utf-8').write(s)
-              print("PATCH OK: ahora noVNC prefiere el security type 2 (VNC clasico)")
+              open(p, 'w', encoding='utf-8').write(s.replace(old, new, 1))
+              print("PATCH OK")
           else:
               print("PATCH: ya aplicado o patron no encontrado")
           PYEOF
-          grep -n "a === 2 ? -1" /tmp/novnc/core/rfb.js | head -3
-          echo "noVNC OK: $(ls /tmp/novnc/vnc.html >/dev/null 2>&1 && echo si || echo no)"
+          grep -c "a === 2 ? -1" /tmp/novnc/core/rfb.js
 
       - name: Instalar websockify + cloudflared
         run: |
@@ -141,7 +112,7 @@ jobs:
           echo "========== URL noVNC =========="
           echo "$URL"
           echo "================================"
-          echo "--- websockify.log ---"; cat /tmp/websockify.log
+          cat /tmp/websockify.log
           git checkout -B main origin/main 2>/dev/null || git checkout -B main
           git config user.email "novnc-bot@users.noreply.github.com"
           git config user.name "novnc-bot"
