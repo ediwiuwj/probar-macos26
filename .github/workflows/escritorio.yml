@@ -55,6 +55,10 @@ jobs:
 
       - name: Preparar el escritorio (wallpaper visible + ventanas)
         run: |
+          echo "=== resolucion real del escritorio (bounds) ==="
+          /bin/bash -c "osascript -e 'tell application \"Finder\" to get bounds of window of desktop'" 2>&1 | head -3
+          /bin/bash -c "/usr/sbin/screencapture -x -t jpg /tmp/b.jpg" 2>&1 || true
+          /bin/bash -c "/usr/bin/sips -g pixelWidth -g pixelHeight /tmp/b.jpg" 2>&1 | tail -2
           echo "=== wallpapers disponibles ==="
           ls /System/Library/Desktop\ Pictures/ 2>&1 | head -12
           echo "=== poner wallpaper visible ==="
@@ -72,14 +76,16 @@ jobs:
           echo "=== abrir Terminal con contenido ==="
           /bin/bash -c 'osascript -e "tell application \"Terminal\" to do script \"sw_vers; uname -a; echo ESCORITORIO-ACTIVO\"" -e "tell application \"Terminal\" to activate"' 2>&1 | head -3 || true
           sleep 5
+          /bin/bash -c 'osascript -e "tell application \"Terminal\" to set bounds of front window to {40, 60, 900, 620}"' 2>&1 | head -2 || true
           /bin/bash -c 'open -a "TextEdit"' 2>&1 | head -2 || true
           sleep 4
           echo "=== apps abiertas ==="
-          ps ax -o command | grep -iE "Terminal.app|TextEdit|Safari" | grep -v grep | head -5 || echo "ninguna"
+          ps ax -o command | grep -iE "Terminal.app|TextEdit" | grep -v grep | head -5 || echo "ninguna"
           echo
           echo "=== verificacion: contenido en el CENTRO de la pantalla ==="
           /bin/bash -c "/usr/sbin/screencapture -x -t jpg /tmp/check.jpg" 2>&1 || true
           ls -la /tmp/check.jpg 2>&1 || echo "sin captura"
+          /usr/bin/sips -g pixelWidth -g pixelHeight /tmp/check.jpg 2>&1 | tail -2
           python3 -m venv /tmp/vp >/dev/null 2>&1 || true
           /tmp/vp/bin/pip install -q pillow 2>&1 | tail -1 || true
           /tmp/vp/bin/python - <<'PYEOF' 2>&1 || true
@@ -90,11 +96,9 @@ jobs:
           def band(y0,y1,label):
               vals=[px[x,y] for y in range(y0,min(y1,H),2) for x in range(0,W,4)]
               print(f"  {label:26} media={sum(vals)/len(vals):6.1f}  no_nulos={100*sum(1 for v in vals if v)/len(vals):5.1f}%")
-          band(0,28,"menu")
-          band(28,120,"borde")
-          band(120,600,"CENTRO (wallpaper)")
-          band(600,700,"inferior")
-          band(700,768,"dock")
+          band(0,int(H*0.06),"menu")
+          band(int(H*0.06),int(H*0.80),"CENTRO")
+          band(int(H*0.80),H,"inferior/dock")
           cols,rows=80,40
           small=im.resize((cols,rows)); chars=" .:-=+*#%@"; d=list(small.getdata())
           print("  --- ASCII ---")
@@ -102,15 +106,49 @@ jobs:
               print("  |"+"".join(chars[min(9,v*10//256)] for v in d[y*cols:(y+1)*cols])+"|")
           PYEOF
 
+      - name: Levantar noVNC nativo (VNC real) en paralelo + sonda
+        run: |
+          KS=/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart
+          sudo "$KS" -activate -configure -access -on -users runner -privs -all \
+            -clientopts -setvnclegacy -vnclegacy yes -setvncpw -vncpw macos26 \
+            -restart -agent 2>&1 | tail -4
+          sleep 6
+          mkdir -p /tmp/novnc
+          curl -fsSL --retry 3 -o /tmp/novnc.tar.gz https://github.com/novnc/noVNC/archive/refs/tags/v1.5.0.tar.gz
+          tar -xzf /tmp/novnc.tar.gz -C /tmp/novnc --strip-components=1
+          python3 - <<'PYEOF'
+          p = '/tmp/novnc/core/rfb.js'
+          s = open(p, encoding='utf-8').read()
+          old = "const types = this._sock.rQshiftBytes(numTypes);"
+          new = old + "\n            types.sort((a, b) => (a === 2 ? -1 : (b === 2 ? 1 : 0)));"
+          if old in s and 'a === 2 ? -1' not in s:
+              open(p, 'w', encoding='utf-8').write(s.replace(old, new, 1))
+              print("PATCH OK")
+          PYEOF
+          python3 -m venv /tmp/vncenv >/dev/null 2>&1 || true
+          /tmp/vncenv/bin/pip install -q websockify 2>&1 | tail -1 || true
+          WS=$(/tmp/vncenv/bin/python -c "import websockify,os;print(os.path.dirname(websockify.__file__))" 2>/dev/null || echo "")
+          echo "websockify: $WS"
+          if [ -n "$WS" ]; then
+            nohup /tmp/vncenv/bin/python "$WS/websocketproxy.py" --web /tmp/novnc 6080 localhost:5900 >/tmp/websockify.log 2>&1 &
+            sleep 4
+            cat /tmp/websockify.log
+          fi
+          echo "=== SONDA: contenido del framebuffer VNC (varias passwords) ==="
+          python3 tools/vncprobe.py macos26 "macos26 " "" runner password tahoe macos admin vnc 12345678 87654321 123456 2>&1 | tail -60 || true
+
       - name: Levantar escritorio web + tunel
         run: |
-          nohup /bin/bash -c "python3 tools/webdesktop.py" >/tmp/webdesktop.log 2>&1 &
+          nohup /bin/bash -c "FPS=6 python3 tools/webdesktop.py" >/tmp/webdesktop.log 2>&1 &
           sleep 12
           echo "--- log webdesktop ---"; cat /tmp/webdesktop.log
           echo "--- test local ---"
           curl -s -o /dev/null -w "info -> HTTP %{http_code}\n" --max-time 10 http://127.0.0.1:6081/info || true
-          curl -s -o /dev/null -w "screen.jpg -> HTTP %{http_code} (%{size_download} bytes)\n" --max-time 20 http://127.0.0.1:6081/screen.jpg || true
           curl -s --max-time 10 http://127.0.0.1:6081/info || true
+          echo
+          echo "--- test stream MJPEG (5s) ---"
+          curl -s --max-time 5 -o /tmp/stream.bin -w "stream -> HTTP %{http_code} %{size_download} bytes\n" http://127.0.0.1:6081/stream.mjpeg || true
+          head -c 120 /tmp/stream.bin | cat -v | head -3
           echo
           if [ ! -x /tmp/cloudflared ]; then
             curl -fsSL --retry 3 -o /tmp/cloudflared.tgz https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-arm64.tgz
@@ -120,22 +158,33 @@ jobs:
           nohup /tmp/cloudflared tunnel --url http://localhost:6081 >/tmp/cf.log 2>&1 &
           sleep 20
           URL=$(grep -oE "https://[a-zA-Z0-9.-]+\.trycloudflare\.com" /tmp/cf.log | head -1)
-          echo "========== URL ESCRITORIO WEB =========="
+          echo "========== URL ESCRITORIO WEB (MJPEG) =========="
           echo "$URL"
-          echo "=========================================="
+          echo "=============================================="
           tail -3 /tmp/cf.log
+          VNCURL=""
+          if curl -s --max-time 3 -o /dev/null http://127.0.0.1:6080/vnc.html; then
+            nohup /tmp/cloudflared tunnel --url http://localhost:6080 >/tmp/cf2.log 2>&1 &
+            sleep 18
+            VNCURL=$(grep -oE "https://[a-zA-Z0-9.-]+\.trycloudflare\.com" /tmp/cf2.log | head -1)
+            echo "========== URL noVNC (VNC nativo) =========="
+            echo "$VNCURL"
+            echo "============================================"
+          fi
           git fetch origin main 2>&1 | tail -1 || true
           git checkout -B main origin/main 2>/dev/null || git checkout -B main
           git config user.email "bot@users.noreply.github.com"
           git config user.name "bot"
           echo "$URL" > URL.txt
-          git add -f URL.txt
+          echo "$VNCURL" > VNCURL.txt
+          git add -f URL.txt VNCURL.txt
           git commit -q -m "URL escritorio web" || true
           PUSH="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           git push "$PUSH" main > /tmp/push.log 2>&1 || {
             git pull --rebase origin main 2>&1 | tail -2
             echo "$URL" > URL.txt
-            git add -f URL.txt
+            echo "$VNCURL" > VNCURL.txt
+            git add -f URL.txt VNCURL.txt
             git commit -q -m "URL escritorio web" || true
             git push "$PUSH" main > /tmp/push2.log 2>&1 || true
             cat /tmp/push2.log

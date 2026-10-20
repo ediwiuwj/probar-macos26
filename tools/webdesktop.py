@@ -1,34 +1,32 @@
 #!/usr/bin/env python3
 """
-Escritorio web para macOS 26 corriendo en un runner de GitHub Actions.
+Escritorio web para macOS 26 en un runner de GitHub Actions.
 
-Sirve la consola real del runner (que tiene sesion grafica de 'runner') como
-imagenes JPEG y permite inyectar raton y teclado.
+- VISTA: streaming MJPEG nativo (multipart/x-mixed-replace). El navegador
+  reproduce el flujo directamente, sin polling: latencia ~= intervalo de captura.
+- CONTROL: POST /event con inyeccion de raton/teclado via cliclick.
 
 Endpoints:
-  GET  /            -> HTML del escritorio
-  GET  /screen.jpg  -> captura actual de la consola
-  GET  /info        -> {width,height}
-  POST /event       -> {kind: move|down|up|key|text, ...}
+  GET  /              -> HTML
+  GET  /stream.mjpeg  -> stream de frames (multipart)
+  GET  /screen.jpg    -> frame actual (debug)
+  GET  /info          -> {width,height}
+  POST /event         -> {kind: move|down|up|key|text|scroll, ...}
 """
 import http.server
 import json
 import os
+import shutil
 import socketserver
 import subprocess
 import threading
 import time
 
 SHOT = "/tmp/webdesktop.jpg"
-STATE = {"data": b"", "mtime": 0}
+STATE = {"data": b"", "mtime": 0.0, "seq": 0}
 LOCK = threading.Lock()
 SCREEN = {"w": 1024, "h": 768}
-
-CLICLICK_CANDIDATES = [
-    "/opt/homebrew/bin/cliclick",
-    "/usr/local/bin/cliclick",
-    "cliclick",
-]
+FPS = float(os.environ.get("FPS", "5"))
 
 KEYMAP = {
     "Enter": "return", "Backspace": "delete", "Tab": "tab", "Escape": "esc",
@@ -41,30 +39,21 @@ KEYMAP = {
 
 
 def find_cliclick():
-    for c in CLICLICK_CANDIDATES:
-        if os.path.isabs(c) and os.path.exists(c):
+    p = shutil.which("cliclick")
+    if p:
+        return p
+    for c in ("/opt/homebrew/bin/cliclick", "/usr/local/bin/cliclick"):
+        if os.path.exists(c):
             return c
-        if not os.path.isabs(c):
-            from shutil import which
-            p = which(c)
-            if p:
-                return p
     return None
 
 
 CLICLICK = find_cliclick()
 
 
-def run(cmd, timeout=15):
-    try:
-        return subprocess.run(cmd, capture_output=True, timeout=timeout)
-    except Exception as e:
-        return None
-
-
 def run_via_bash(cmd, timeout=15):
-    """Ejecuta a traves de /bin/bash, que ya tiene los permisos TCC (accesibilidad
-    y captura de pantalla) concedidos en la imagen de GitHub."""
+    """Todo pasa por /bin/bash, que ya tiene TCC de Screen Recording y
+    Accessibility concedido en la imagen de GitHub."""
     try:
         return subprocess.run(["/bin/bash", "-c", cmd],
                               capture_output=True, timeout=timeout)
@@ -73,11 +62,10 @@ def run_via_bash(cmd, timeout=15):
 
 
 def detect_size():
-    r = run(["/usr/bin/sips", "-g", "pixelWidth", "-g", "pixelHeight", SHOT])
+    r = run_via_bash("/usr/bin/sips -g pixelWidth -g pixelHeight " + SHOT)
     if r and r.returncode == 0:
-        out = r.stdout.decode("utf-8", "replace")
         vals = {}
-        for line in out.splitlines():
+        for line in r.stdout.decode("utf-8", "replace").splitlines():
             if "pixelWidth" in line:
                 vals["w"] = int(line.split(":")[-1].strip())
             if "pixelHeight" in line:
@@ -96,9 +84,10 @@ def capture_loop():
                 with LOCK:
                     STATE["data"] = data
                     STATE["mtime"] = time.time()
+                    STATE["seq"] += 1
         except Exception:
             pass
-        time.sleep(0.55)
+        time.sleep(1.0 / FPS)
 
 
 def cliclick(*args):
@@ -135,30 +124,34 @@ HTML = """<!doctype html>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>macOS 26 (Tahoe) - runner</title>
 <style>
-  html,body{margin:0;background:#0b0b0f;color:#ddd;font:13px system-ui;
-            display:flex;flex-direction:column;align-items:center;
-            justify-content:center;height:100vh;overflow:hidden}
-  #wrap{position:relative;display:inline-block;box-shadow:0 0 40px #000;
-        border:1px solid #333;background:#000}
-  img{display:block;max-width:96vw;max-height:86vh;width:auto;height:auto;
-      image-rendering:auto;user-select:none;cursor:crosshair}
-  #hud{position:absolute;top:6px;left:8px;background:#000a;padding:4px 8px;
-       border-radius:6px;font-size:11px;pointer-events:none;color:#0f0}
-  #bar{position:fixed;bottom:8px;left:8px;background:#000c;padding:5px 10px;
+  html,body{margin:0;height:100%;background:#08080c;color:#ddd;
+            font:13px system-ui;overflow:hidden}
+  #stage{position:absolute;inset:6px;display:flex;align-items:center;
+         justify-content:center}
+  #wrap{position:relative;width:100%;height:100%;display:flex;
+        align-items:center;justify-content:center}
+  img{max-width:100%;max-height:100%;width:auto;height:auto;
+      object-fit:contain;image-rendering:auto;user-select:none;cursor:crosshair;
+      border:1px solid #2b2b33;box-shadow:0 0 30px #000}
+  #hud{position:fixed;top:8px;left:10px;background:#000b;padding:4px 9px;
+       border-radius:6px;font-size:11px;pointer-events:none}
+  #bar{position:fixed;bottom:8px;left:10px;background:#000b;padding:5px 11px;
        border-radius:6px;font-size:11px}
 </style></head><body>
-<div id="wrap"><img id="s" src="/screen.jpg?t=0"><div id="hud">macOS 26</div></div>
-<div id="bar">raton: clic / arrastrar &nbsp;|&nbsp; teclado: escribe en la pagina &nbsp;|&nbsp; ~0.4s de latencia</div>
+<div id="stage"><div id="wrap"><img id="s" src="/stream.mjpeg"></div></div>
+<div id="hud">macOS 26</div>
+<div id="bar">raton: clic / arrastrar &nbsp;|&nbsp; teclado: escribe en la pagina &nbsp;|&nbsp; stream MJPEG</div>
 <script>
 const img=document.getElementById('s'), hud=document.getElementById('hud');
 let W=1024,H=768,lastMove=0;
 fetch('/info').then(r=>r.json()).then(j=>{W=j.width;H=j.height;});
 function pos(e){const r=img.getBoundingClientRect();
+  if(!r.width||!r.height) return {x:0,y:0};
   return {x:Math.max(0,Math.min(W-1,Math.round((e.clientX-r.left)/r.width*W))),
           y:Math.max(0,Math.min(H-1,Math.round((e.clientY-r.top)/r.height*H)))};}
 function send(ev){fetch('/event',{method:'POST',headers:{'Content-Type':'application/json'},
   body:JSON.stringify(ev)}).catch(()=>{});}
-img.addEventListener('mousemove',e=>{const now=Date.now();if(now-lastMove<80)return;
+img.addEventListener('mousemove',e=>{const now=Date.now();if(now-lastMove<60)return;
   lastMove=now;send({kind:'move',...pos(e)});});
 img.addEventListener('mousedown',e=>{e.preventDefault();send({kind:'down',...pos(e)});});
 window.addEventListener('mouseup',e=>{send({kind:'up',...pos(e)});});
@@ -169,9 +162,7 @@ window.addEventListener('keydown',e=>{
   else{send({kind:'key',key:e.key});}
   e.preventDefault();
 });
-function poll(){img.src='/screen.jpg?t='+Date.now();
-  hud.textContent='macOS 26 - '+new Date().toLocaleTimeString();}
-setInterval(poll,400);
+setInterval(()=>{hud.textContent='macOS 26 - '+new Date().toLocaleTimeString();},500);
 </script></body></html>"""
 
 
@@ -191,10 +182,37 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _stream(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.close_connection = True
+        last_seq = -1
+        try:
+            while True:
+                with LOCK:
+                    data = STATE["data"]
+                    seq = STATE["seq"]
+                if data and seq != last_seq:
+                    last_seq = seq
+                    self.wfile.write(
+                        b"--frame\r\nContent-Type: image/jpeg\r\n"
+                        b"Content-Length: " + str(len(data)).encode() + b"\r\n\r\n")
+                    self.wfile.write(data)
+                    self.wfile.write(b"\r\n")
+                    self.wfile.flush()
+                time.sleep(0.03)
+        except Exception:
+            pass
+
     def do_GET(self):
         path = self.path.split("?")[0]
         if path in ("/", "/index.html"):
             self._send(200, HTML, "text/html; charset=utf-8")
+        elif path == "/stream.mjpeg":
+            self._stream()
         elif path == "/screen.jpg":
             with LOCK:
                 data = STATE["data"]
@@ -235,5 +253,6 @@ if __name__ == "__main__":
     threading.Thread(target=capture_loop, daemon=True).start()
     time.sleep(3)
     detect_size()
-    print(f"webdesktop: {SCREEN['w']}x{SCREEN['h']} cliclick={CLICLICK}", flush=True)
+    print(f"webdesktop: {SCREEN['w']}x{SCREEN['h']} fps={FPS} cliclick={CLICLICK}",
+          flush=True)
     Server(("127.0.0.1", port), Handler).serve_forever()
