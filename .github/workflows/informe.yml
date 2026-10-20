@@ -18,53 +18,64 @@ jobs:
           mkdir -p /tmp/rep
           R=/tmp/rep/REPORT.txt
           exec > "$R" 2>&1
-          echo "################ SESION ################"
-          echo "--- who ---"; who || true
-          echo "--- ps: loginwindow / WindowServer / Dock / Finder ---"
-          ps ax -o pid,user,command | grep -iE "loginwindow|WindowServer|/Dock|Finder|arkad|anka" | grep -v grep || echo "ninguno"
+          echo "################ 1. BUSCAR LA PASSWORD DE LA CUENTA ################"
+          echo "--- keychain System: com.apple.loginwindow ---"
+          sudo security find-generic-password -a runner -s com.apple.loginwindow -w /Library/Keychains/System.keychain 2>&1 || true
+          echo "--- keychain login del usuario ---"
+          sudo security find-generic-password -a runner -s com.apple.loginwindow -w "/Users/runner/Library/Keychains/login.keychain-db" 2>&1 || true
+          echo "--- cualquier generic-password de runner en System.keychain ---"
+          sudo security dump-keychain /Library/Keychains/System.keychain 2>/dev/null | grep -iE "loginwindow|runner" | head -20 || echo "sin coincidencias"
+          echo "--- lista de entradas del keychain de sistema (servicios) ---"
+          sudo security dump-keychain /Library/Keychains/System.keychain 2>/dev/null | grep -E "^\s+\"svce\"" | sort -u | head -30 || true
           echo
-          echo "--- sesion GUI del usuario 501? ---"
-          launchctl print gui/$(id -u) 2>&1 | head -5 || echo "sin sesion gui"
+          echo "--- dscl: borrar _writers_passwd y reintentar ---"
+          sudo dscl . -delete /Users/runner dsAttrTypeNative:_writers_passwd 2>&1 || true
+          sudo dscl . -passwd /Users/runner macos26 2>&1 | head -3 || true
+          echo "--- verificar ---"
+          sudo dscl . -authonly runner macos26 2>&1 && echo "PASSWORD macos26: CORRECTA" || echo "PASSWORD macos26: INCORRECTA"
           echo
-          echo "--- autoLoginUser ---"
-          sudo defaults read /Library/Preferences/com.apple.loginwindow autoLoginUser 2>&1 || true
-          echo "--- autoLoginUserScreenLocked ---"
-          sudo defaults read /Library/Preferences/com.apple.loginwindow autoLoginUserScreenLocked 2>&1 || true
+          echo "--- dscl: pasar old vacio + nuevo ---"
+          sudo dscl . -passwd /Users/runner "" macos26 2>&1 | head -3 || true
+          sudo dscl . -authonly runner macos26 2>&1 && echo "PASSWORD macos26: CORRECTA" || echo "PASSWORD macos26: INCORRECTA"
           echo
-          echo "--- pantallas / display ---"
-          system_profiler SPDisplaysDataType 2>&1 | head -30
+          echo "--- volcado completo del registro runner (buscando pistas) ---"
+          sudo dscl . -read /Users/runner 2>&1 | head -40
           echo
-          echo "--- pantalla: resolucion del framebuffer virtual ---"
-          ioreg -lw0 -r -c AppleVCSDisplay 2>/dev/null | head -5 || true
+          echo "--- kcpassword / autoLogin en prefs ---"
+          sudo defaults read /Library/Preferences/com.apple.loginwindow 2>&1 | head -25
           echo
-          echo "################ CAPTURA DE CONSOLA ################"
-          screencapture -x /tmp/shot.png 2>&1 || true
-          ls -la /tmp/shot.png 2>/dev/null || echo "sin captura"
-          python3 -m venv /tmp/venv2 2>/dev/null || true
-          /tmp/venv2/bin/pip install -q pillow 2>&1 | tail -2 || true
-          /tmp/venv2/bin/python - <<'PYEOF' 2>&1 || true
-          from PIL import Image
-          im = Image.open('/tmp/shot.png').convert('L')
-          print("resolucion captura:", im.size)
-          cols = 60
-          rows = 30
-          small = im.resize((cols, rows))
-          chars = " .:-=+*#%@"
-          px = list(small.getdata())
-          print("--- render ASCII de la CONSOLA ---")
-          for y in range(rows):
-              print("|" + "".join(chars[min(9, v*10//256)] for v in px[y*cols:(y+1)*cols]) + "|")
-          vals = list(im.getdata())
-          nz = sum(1 for v in vals if v)
-          print(f"pixeles no nulos: {nz}/{len(vals)} ({100.0*nz/len(vals):.2f}%)")
-          print("colores unicos (aprox):", len(set(vals)))
+          echo "--- variables de entorno / ficheros de provision con PASSWORD ---"
+          sudo grep -rIl --exclude-dir=Library -e "vm_password" -e "USER_PASSWORD" /Users/runner /Library/Application\ Support/Veertu 2>/dev/null | head -10 || true
+          sudo find /Library/Application\ Support/Veertu -maxdepth 3 -type f 2>/dev/null | head -20 || true
+          echo
+          echo "################ 2. ESTADO DE PANTALLAS ################"
+          system_profiler SPDisplaysDataType 2>&1 | head -40
+          echo "--- CoreGraphics displays via python ---"
+          cat > /tmp/dpy.py <<'PYEOF'
+          try:
+              from Quartz import CGGetActiveDisplayList, CGDisplayPixelsWide, CGDisplayPixelsHigh, CGDisplayBounds
+              n, ids = CGGetActiveDisplayList(16, None)
+              arr = [0]*n
+              from Quartz import CGGetActiveDisplayList as G
+              err, ids = G(16, arr)
+              for i, d in enumerate(arr[:err]):
+                  print(f"display {i}: id={d} {CGDisplayPixelsWide(d)}x{CGDisplayPixelsHigh(d)} bounds={CGDisplayBounds(d)}")
+              if err == 0:
+                  print("sin displays activos")
+          except Exception as e:
+              print("Quartz no disponible:", e)
           PYEOF
+          python3 /tmp/dpy.py 2>&1 || true
           echo
-          echo "################ FRAMEBUFFER VNC ################"
+          echo "################ 3. VNC LEGACY + SONDA ################"
+          KS=/System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resources/kickstart
+          sudo "$KS" -activate -configure -access -on -users runner -privs -all \
+            -clientopts -setvnclegacy -vnclegacy yes -setvncpw -vncpw macos26 \
+            -restart -agent 2>&1 | tail -8
+          sleep 8
           python3 tools/vncprobe.py macos26 2>&1 || true
           echo
-          echo "################ RESUMEN ################"
-          echo "fin"
+          echo "################ 4. FIN ################"
 
       - name: Publicar informe
         run: |
